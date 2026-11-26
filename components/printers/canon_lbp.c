@@ -80,6 +80,7 @@ typedef struct {
 
     uint16_t job_id;
     uint16_t page_num;
+    uint16_t hw_page;
     uint16_t page_decoding;
     uint16_t page_received;
     uint16_t page_out;
@@ -99,6 +100,10 @@ typedef struct {
     bool err;
     uint8_t model_id[2];
     bool has_model_id;
+    uint8_t fifo_free;
+    bool has_fifo_credits;
+    bool page_fired;
+    uint32_t page_bytes_sent;
 } capt_job_t;
 
 static void capt_log_hex(const char *label, const uint8_t *buf, size_t len)
@@ -248,7 +253,7 @@ static int capt_sendrecv(capt_job_t *j, uint16_t cmd, const void *payload, size_
     }
     if (rlen)
         *rlen = total - 4;
-    if (cmd != CAPT_CHKSTATUS) {
+    if (cmd != CAPT_CHKSTATUS && cmd != CAPT_CHKXSTATUS) {
         CAPT_LOGI("cmd %04x -> %zu B [%02x %02x %02x %02x %02x %02x]", cmd, total, head[0], head[1], head[2],
                   head[3], head[4], head[5]);
     }
@@ -302,9 +307,12 @@ static int capt_get_xstatus(capt_job_t *j, bool force)
     memset(r, 0, sizeof(r));
     if (capt_sendrecv(j, CAPT_CHKXSTATUS, NULL, 0, r, sizeof(r), &rn) < 0)
         return -1;
+    if (rn >= 6) {
+        j->fifo_free = (uint8_t)(r[4] & 0x0Fu);
+        if (j->fifo_free > 0)
+            j->has_fifo_credits = true;
+    }
     if (rn >= 22) {
-        if (force)
-            capt_log_hex("a0a8", r, rn);
         j->status0 = (uint16_t)(r[0] | (r[1] << 8));
         j->status1 = (uint16_t)(r[8] | (r[9] << 8));
         j->status2 = (uint16_t)(r[10] | (r[11] << 8));
@@ -359,6 +367,25 @@ static int capt_send_job_setup(capt_job_t *j, uint8_t fg, uint16_t page)
     buf[27] = 1;
     buf[31] = 0x01;
     return capt_sendrecv(j, CAPT_JOB_SETUP, buf, sizeof(buf), NULL, 0, NULL);
+}
+
+static int capt_fire_page(capt_job_t *j, uint16_t pg)
+{
+    if (j->page_fired || j->err)
+        return j->err ? -1 : 0;
+    j->page_fired = true;
+    if (capt_send_job_setup(j, 2, pg) < 0)
+        return -1;
+    capt_wait_ready(j);
+    uint8_t fire[2] = {(uint8_t)(pg & 0xff), (uint8_t)(pg >> 8)};
+    if (capt_sendrecv(j, CAPT_FIRE, fire, sizeof(fire), NULL, 0, NULL) < 0)
+        return -1;
+    capt_wait_ready(j);
+    if (capt_send_job_setup(j, 6, pg) < 0)
+        return -1;
+    CAPT_LOGI("fired pg=%u (sent=%u B fifo=%u dec=%u rx=%u)", pg, (unsigned)j->page_bytes_sent, j->fifo_free,
+              j->page_decoding, j->page_received);
+    return j->err ? -1 : 0;
 }
 
 // --- Hi-SCoA compressor (clean-room per CAPT Hi-SCoA spec) ----------------
@@ -527,9 +554,40 @@ static int flush_band(capt_job_t *j, bool last_band)
         if (chunk > 0xff00u)
             chunk = 0xff00u;
         j->bands_sent++;
-        if (j->io.read && (j->bands_sent % 16) == 0)
-            capt_wait_ready(j);
+        if (j->io.read) {
+            if (j->has_fifo_credits) {
+                if (!j->page_fired && j->page_bytes_sent >= 512u * 1024u) {
+                    capt_get_xstatus(j, true);
+                    if (j->page_decoding >= j->hw_page)
+                        capt_fire_page(j, j->hw_page);
+                }
+                for (int t = 0; t < 1200 && j->fifo_free == 0 && !j->err; t++) {
+                    if (capt_get_xstatus(j, true) < 0)
+                        break;
+                    if (j->fifo_free > 0)
+                        break;
+                    if (!j->page_fired && j->page_decoding >= j->hw_page)
+                        capt_fire_page(j, j->hw_page);
+                    if (((j->status0 & 0x0002u) || (j->status1 & 0x4000u)) && !(j->status1 & (0x0004u | 0x0080u))) {
+                        CAPT_LOGW("fifo wait error pg=%u s0=%04x s1=%04x", j->hw_page, j->status0, j->status1);
+                        j->err = true;
+                        break;
+                    }
+                    capt_sleep_ms(50);
+                }
+                if (j->fifo_free == 0 && !j->err) {
+                    CAPT_LOGW("fifo wait timeout pg=%u s0=%04x s1=%04x", j->hw_page, j->status0, j->status1);
+                    j->err = true;
+                    break;
+                }
+            } else if ((j->bands_sent % 16) == 0) {
+                capt_wait_ready(j);
+            }
+        }
         capt_send_flush(j, CAPT_PRINT_DATA, j->comp + off, chunk);
+        j->page_bytes_sent += (uint32_t)chunk;
+        if (j->fifo_free > 0)
+            j->fifo_free--;
         off += chunk;
     }
     j->band_y = 0;
@@ -654,6 +712,8 @@ static int page_begin(void *job, int src_w, int src_h, int bytes_pp)
     j->band_y = 0;
     j->total_y = 0;
     j->in_page = true;
+    j->page_fired = false;
+    j->page_bytes_sent = 0;
     j->page_num++;
 
     if (j->io.read) {
@@ -665,12 +725,15 @@ static int page_begin(void *job, int src_w, int src_h, int bytes_pp)
             capt_wait_ready(j);
             capt_sendrecv(j, CAPT_UPLOAD_2, magic2, sizeof(magic2), NULL, 0, NULL);
             capt_wait_ready(j);
+            j->hw_page = 0;
         }
         for (int t = 0; t < 120 && (j->status0 & 0x0004u); t++) {
             capt_sleep_ms(100);
             capt_poll_status(j);
         }
+        capt_get_xstatus(j, true);
     }
+    j->hw_page++;
 
     capt_variant_t v = variant_of(j->drv);
     uint8_t sz = j->paper == 1 ? 0x0D : 0x02;   // Letter=0x0D, A4=0x02
@@ -700,7 +763,7 @@ static int page_begin(void *job, int src_w, int src_h, int bytes_pp)
     uint8_t dup = 0x00;
     uint8_t p20 = 0x00;
     if (v == CAPT_LBP3300 && j->sides != PRINTER_SIDES_ONE_SIDED)
-        dup = (j->page_num % 2) == 1 ? 0x02 : 0x04;
+        dup = (j->page_num % 2) == 1 ? 0x04 : 0x02;
     uint8_t pp[40] = {
         0x00, 0x00, b2, b3, sz, dup, src, 0x00,
         0x1C, 0x1C, 0x1C, 0x1C, 0x00, 0x11, 0x04, 0x00,
@@ -772,29 +835,23 @@ static int page_end(void *job)
         capt_send_flush(j, CAPT_PRINT_DATA_END, NULL, 0);
 
     if (!j->err) {
-        uint16_t pg = j->page_num;
         if (j->io.read) {
             for (int t = 0; t < 120; t++) {
+                if (capt_get_xstatus(j, true) < 0)
+                    break;
+                if (j->page_received >= j->hw_page && j->page_decoding >= j->hw_page)
+                    break;
+                if (((j->status0 & 0x0002u) || (j->status1 & 0x4000u)) && !(j->status1 & (0x0004u | 0x0080u)))
+                    break;
                 capt_sleep_ms(100);
-                if (capt_get_xstatus(j, j->page_decoding == 0) < 0)
-                    break;
-                if (j->page_received == j->page_decoding && j->page_decoding > 0) {
-                    pg = j->page_decoding;
-                    break;
-                }
             }
         }
-        capt_send_job_setup(j, 2, pg);
-        capt_wait_ready(j);
-        uint8_t fire[2] = {(uint8_t)(pg & 0xff), (uint8_t)(pg >> 8)};
-        capt_sendrecv(j, CAPT_FIRE, fire, sizeof(fire), NULL, 0, NULL);
-        capt_wait_ready(j);
-        capt_send_job_setup(j, 6, pg);
+        capt_fire_page(j, j->hw_page);
         if (j->io.read) {
             for (int t = 0; t < 300; t++) {
-                if (capt_get_xstatus(j, t == 0) < 0)
+                if (capt_get_xstatus(j, true) < 0)
                     break;
-                if (j->page_out == pg)
+                if (j->page_out >= j->hw_page)
                     break;
                 if ((j->status0 & 0x0002u) || (j->status1 & 0x4000u)) {
                     if (!(j->status1 & (0x0004u | 0x0080u)))
@@ -803,8 +860,9 @@ static int page_end(void *job)
                 capt_sleep_ms(100);
             }
         }
-        CAPT_LOGI("page_end pg=%u dec=%u rx=%u out=%u s0=%04x s1=%04x", pg, j->page_decoding, j->page_received,
-                  j->page_out, j->status0, j->status1);
+        CAPT_LOGI("page_end pg=%u (hw=%u) sent=%u B dec=%u rx=%u out=%u s0=%04x s1=%04x", j->page_num, j->hw_page,
+                  (unsigned)j->page_bytes_sent, j->page_decoding, j->page_received, j->page_out, j->status0,
+                  j->status1);
     }
     return j->err ? -1 : 0;
 }
@@ -814,20 +872,24 @@ static int job_end(void *job)
     capt_job_t *j = job;
     if (j->in_page && !j->err)
         page_end(j);
+    if (!j->err && variant_of(j->drv) == CAPT_LBP3300 && j->sides != PRINTER_SIDES_ONE_SIDED &&
+        (j->page_num % 2) == 1) {
+        if (page_begin(j, 1, 1, 1) == 0)
+            page_end(j);
+    }
     if (!j->err) {
-        uint16_t pg = j->page_num;
         if (j->io.read) {
             for (int t = 0; t < 300; t++) {
-                if (capt_get_xstatus(j, t == 0) < 0)
+                if (capt_get_xstatus(j, true) < 0)
                     break;
-                if (j->page_completed == j->page_decoding) {
-                    pg = j->page_completed;
+                if (j->page_completed >= j->hw_page)
                     break;
-                }
+                if (((j->status0 & 0x0002u) || (j->status1 & 0x4000u)) && !(j->status1 & (0x0004u | 0x0080u)))
+                    break;
                 capt_sleep_ms(100);
             }
         }
-        capt_send_job_setup(j, 4, pg);
+        capt_send_job_setup(j, 4, j->hw_page);
         uint8_t jbuf[2] = {(uint8_t)(j->job_id & 0xff), (uint8_t)(j->job_id >> 8)};
         capt_sendrecv(j, CAPT_JOB_END, jbuf, sizeof(jbuf), NULL, 0, NULL);
         if (!j->err && j->io.flush && j->io.flush(j->io.ctx) < 0)

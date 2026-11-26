@@ -48,6 +48,7 @@
 #define LISTEN_STACK_SIZE (256 * 1024)
 #endif
 #define IDLE_TIMEOUT_S 15
+#define DOC_TIMEOUT_S 60
 #define MAX_JOBS 10
 #define MULTIPLE_OP_TIMEOUT_S 60
 
@@ -1042,8 +1043,12 @@ static int print_document(conn_t *c, job_t *j)
     p->job = j;
     doc_reader_t rd = {c, j, 0};
     raster_cb_t cb = {pipe_page_begin, pipe_line, pipe_page_end};
+    struct timeval doc_tv = {.tv_sec = DOC_TIMEOUT_S};
+    setsockopt(c->fd, SOL_SOCKET, SO_RCVTIMEO, &doc_tv, sizeof(doc_tv));
     int64_t t_start = now_us();
     int r = raster_decode(doc_read, &rd, &cb, p);
+    struct timeval idle_tv = {.tv_sec = IDLE_TIMEOUT_S};
+    setsockopt(c->fd, SOL_SOCKET, SO_RCVTIMEO, &idle_tv, sizeof(idle_tv));
     if (p->drv_job && s_cfg->driver->job_stats) {
         char stats[160];
         s_cfg->driver->job_stats(p->drv_job, stats, sizeof(stats));

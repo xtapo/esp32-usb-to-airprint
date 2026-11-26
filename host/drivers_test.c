@@ -481,6 +481,10 @@ typedef struct {
     size_t rlen;
     size_t rpos;
     bool bcd_a2a0;
+    uint8_t fifo_free;
+    uint16_t pages_started, pages_rx, pages_fired;
+    bool sim_fifo;
+    bool fired_before_c0a4;
     int cmds_seen[8]; // 0:A1A1, 1:A2A0, 2:D0A9, 3:C0A0, 4:C0A4, 5:E0A7, 6:E0A9
 } mock_capt_t;
 
@@ -512,6 +516,9 @@ static int mock_capt_write(void *ctx, const uint8_t *data, size_t len)
             // Return STATUS0 = 0x0100 (CAPT_FL_XSTATUS_CHNG) so capt_poll_status reads 0xA0A8
             uint8_t r[6] = {0xA0, 0xE0, 0x06, 0x00, 0x00, 0x01};
             memcpy(m->reply, r, 6); m->rlen = 6; m->rpos = 0;
+        } else if (cmd == 0xE1A9) {
+            uint8_t r[6] = {0xA9, 0xE1, 0x06, 0x00, 0x00, 0x01};
+            memcpy(m->reply, r, 6); m->rlen = 6; m->rpos = 0;
         } else if (cmd == 0xE0A1 || cmd == 0xE0A2 || cmd == 0xE0A3 ||
                    cmd == 0xE0A4 || cmd == 0xE0A5 || cmd == 0xE0A6 || cmd == 0xE0BA ||
                    cmd == 0xA3A2 || cmd == 0xE1A1 || cmd == 0xE1A2 || cmd == 0xA0A1) {
@@ -519,6 +526,11 @@ static int mock_capt_write(void *ctx, const uint8_t *data, size_t len)
             memcpy(m->reply, r, 6); m->rlen = 6; m->rpos = 0;
         } else if (cmd == 0xE0A7) {
             m->cmds_seen[5]++;
+            if (m->pages_rx < m->pages_started)
+                m->fired_before_c0a4 = true;
+            m->pages_fired++;
+            if (m->sim_fifo)
+                m->fifo_free = 15;
             uint8_t r[6] = {0xA7, 0xE0, 0x06, 0x00, 0x00, 0x00};
             memcpy(m->reply, r, 6); m->rlen = 6; m->rpos = 0;
         } else if (cmd == 0xE0A9) {
@@ -528,18 +540,29 @@ static int mock_capt_write(void *ctx, const uint8_t *data, size_t len)
         } else if (cmd == 0xA0A8) {
             memset(m->reply, 0, 88);
             m->reply[0] = 0xA8; m->reply[1] = 0xA0; m->reply[2] = 88; m->reply[3] = 0;
-            // page_decoding=1 (bytes 4+14), page_out=1 (4+18), page_completed=1 (4+20), page_received=1 (4+34)
-            m->reply[4 + 14] = 1;
-            m->reply[4 + 18] = 1;
-            m->reply[4 + 20] = 1;
-            m->reply[4 + 34] = 1;
+            uint16_t pdec = m->pages_started ? m->pages_started : 1;
+            if (m->sim_fifo && m->pages_fired >= m->pages_started && m->fifo_free == 0)
+                m->fifo_free = 15;
+            m->reply[4 + 4] = m->sim_fifo ? m->fifo_free : 0x0F;
+            m->reply[4 + 14] = (uint8_t)(pdec & 0xff);
+            m->reply[4 + 15] = (uint8_t)(pdec >> 8);
+            m->reply[4 + 18] = (uint8_t)(m->pages_fired & 0xff);
+            m->reply[4 + 19] = (uint8_t)(m->pages_fired >> 8);
+            m->reply[4 + 20] = (uint8_t)(m->pages_fired & 0xff);
+            m->reply[4 + 21] = (uint8_t)(m->pages_fired >> 8);
+            m->reply[4 + 34] = (uint8_t)(m->pages_rx & 0xff);
+            m->reply[4 + 35] = (uint8_t)(m->pages_rx >> 8);
             m->rlen = 88; m->rpos = 0;
         } else if (cmd == 0xD0A9) {
             m->cmds_seen[2]++;
+            m->pages_started++;
         } else if (cmd == 0xC0A0) {
             m->cmds_seen[3]++;
+            if (m->sim_fifo && m->fifo_free > 0)
+                m->fifo_free--;
         } else if (cmd == 0xC0A4) {
             m->cmds_seen[4]++;
+            m->pages_rx++;
         }
     }
     return 0;
@@ -744,12 +767,34 @@ int main(void)
             if (mc.tx.buf[k] == 0xA0 && mc.tx.buf[k + 1] == 0xD0 && mc.tx.buf[k + 2] == 0x2C && mc.tx.buf[k + 3] == 0x00) {
                 const uint8_t *pp = mc.tx.buf + k + 4;
                 found_pages++;
-                CHECK(pp[15] == 0x01, "lbp3300 page %d pp[15] duplex flag", found_pages);
-                CHECK(pp[17] == (found_pages == 1 ? 0x01 : 0x02), "lbp3300 page %d pp[17] side", found_pages);
-                CHECK(pp[35] == 0x01, "lbp3300 page %d pp[35] long-edge binding", found_pages);
+                CHECK(pp[5] == (found_pages == 1 ? 0x04 : 0x02), "lbp3300 page %d pp[5] duplex side", found_pages);
+                CHECK(pp[6] == 0x01, "lbp3300 page %d pp[6] cassette 1", found_pages);
+                CHECK(pp[20] == 0x00, "lbp3300 page %d pp[20] flag", found_pages);
             }
         }
         CHECK(found_pages == 2, "lbp3300 expected 2 D0A0 blocks, found %d", found_pages);
+        CHECK(mc.pages_started == 2 && mc.pages_fired == 2, "lbp3300 2-page counters %u/%u", mc.pages_started,
+              mc.pages_fired);
+        free(mc.tx.buf);
+    }
+    {
+        // Canon LBP3300 FIFO-full FlyingStart test: 5 bands (> 3 C0A0 packets)
+        const printer_driver_t *d = printer_driver_find("canon-lbp3300");
+        CHECK(d != NULL, "canon-lbp3300 fifo");
+        mock_capt_t mc = {.sim_fifo = true, .fifo_free = 3};
+        printer_io_t io = {.write = mock_capt_write, .flush = mock_capt_flush, .read = mock_capt_read, .ctx = &mc};
+        void *job = d->job_begin(d, &io, 600, 0);
+        CHECK(job != NULL, "lbp3300 fifo job_begin");
+        CHECK(d->page_begin(job, 64, 300, 1) == 0, "lbp3300 fifo page_begin");
+        uint8_t px[64];
+        memset(px, 0x40, sizeof(px));
+        for (int y = 0; y < 300; y++)
+            CHECK(d->page_line(job, y, px) == 0, "lbp3300 fifo page_line");
+        CHECK(d->page_end(job) == 0, "lbp3300 fifo page_end");
+        CHECK(d->job_end(job) == 0, "lbp3300 fifo job_end");
+        CHECK(mc.cmds_seen[3] >= 4, "lbp3300 fifo expected >= 4 C0A0 packets, got %d", mc.cmds_seen[3]);
+        CHECK(mc.fired_before_c0a4, "lbp3300 fifo did not trigger mid-page FlyingStart");
+        CHECK(mc.cmds_seen[5] == 1, "lbp3300 fifo expected 1 E0A7 fire, got %d", mc.cmds_seen[5]);
         free(mc.tx.buf);
     }
     {
