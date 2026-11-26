@@ -14,7 +14,7 @@ export interface FlashPart {
 
 export function bytesToBinaryString(bytes: Uint8Array): string {
   const chunks: string[] = [];
-  const step = 0x8000;
+  const step = 0x4000;
   for (let i = 0; i < bytes.length; i += step) {
     const sub = bytes.subarray(i, Math.min(i + step, bytes.length));
     chunks.push(String.fromCharCode(...sub));

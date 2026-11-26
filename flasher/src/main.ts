@@ -54,16 +54,29 @@ const STRINGS = {
     logsTitle: 'Nhật ký nạp (Flash Logs)',
     clear: 'Xóa log',
     copy: 'Sao chép',
-    dropHint: 'Kéo thả hoặc chọn file .bin (merged factory.bin ở 0x0, hoặc từng phần 0x0 / 0x8000 / 0x10000)',
+    copied: 'Đã sao chép!',
+    idle: 'Chờ thao tác',
+    done: 'Hoàn tất (100%)',
+    dropHint: 'Kéo thả hoặc chọn file .bin (merged factory.bin ở 0x0, hoặc từng phần 0x0 / 0x8000 / 0xf000 / 0x20000)',
     addPart: 'Chọn file .bin',
     serialTitle: 'Serial Monitor',
     serialConnect: 'Kết nối Serial',
+    serialConnected: 'Đã kết nối',
+    serialDisconnected: 'Chưa kết nối',
     autoScroll: 'Tự cuộn',
     timestamps: 'Hiện thời gian',
     download: 'Tải .txt',
     send: 'Gửi',
     cmdPlaceholder: 'Nhập lệnh hoặc chuỗi gửi xuống ESP32...',
     missingBin: 'Chưa có file nhị phân được build sẵn tại URL này. Hãy chạy "pio run -e esp32s3" + "python tools/make_factory_bin.py --copy-to-flasher" hoặc chuyển sang tab "Tải file .bin riêng".',
+    confirmErase: 'Bạn có chắc muốn xóa toàn bộ Flash? Mọi dữ liệu kể cả cấu hình WiFi trong NVS sẽ bị xóa sạch.',
+    chipWarn: (name: string) => `Cảnh báo: Đang kết nối ${name}, firmware có sẵn được biên dịch cho ESP32-S3.`,
+    chipMismatchConfirm: (detected: string, expected: string) =>
+      `Chip đang kết nối là "${detected}", khác với dòng "${expected}" của firmware này. Bạn vẫn muốn tiếp tục nạp?`,
+    catalogError: 'Không thể tải danh sách firmware (catalog.json). Bạn vẫn có thể nạp từ tab "Tải file .bin riêng".',
+    catalogEmpty: 'Không tìm thấy firmware phù hợp với từ khóa.',
+    flashDoneLog: 'Nạp thành công! Mạch đã được reset và nhả cổng Serial (có thể chuyển sang Serial Monitor hoặc bấm Kết Nối ESP để nạp lại).',
+    resetDoneLog: '\nĐã reset cứng mạch và nhả cổng Serial.\n',
   },
   en: {
     subtitle: 'Web Serial API Firmware Flasher & Serial Monitor for ESP32-S3 AirPrint',
@@ -88,16 +101,29 @@ const STRINGS = {
     logsTitle: 'Flash Logs',
     clear: 'Clear',
     copy: 'Copy',
-    dropHint: 'Drop or pick .bin files (single factory.bin at 0x0, or split 0x0 / 0x8000 / 0x10000)',
+    copied: 'Copied!',
+    idle: 'Idle',
+    done: 'Done (100%)',
+    dropHint: 'Drop or pick .bin files (single factory.bin at 0x0, or split 0x0 / 0x8000 / 0xf000 / 0x20000)',
     addPart: 'Pick .bin file',
     serialTitle: 'Serial Monitor',
     serialConnect: 'Connect Serial',
+    serialConnected: 'Connected',
+    serialDisconnected: 'Not connected',
     autoScroll: 'Auto-scroll',
     timestamps: 'Timestamps',
     download: 'Download .txt',
     send: 'Send',
     cmdPlaceholder: 'Type command to send over UART...',
     missingBin: 'Prebuilt binary not found at this URL yet. Run "pio run -e esp32s3" + "python tools/make_factory_bin.py --copy-to-flasher", or switch to "Upload Local .bin".',
+    confirmErase: 'Erase the entire flash? All data including saved WiFi settings in NVS will be wiped.',
+    chipWarn: (name: string) => `Warning: Connected chip is ${name}, while prebuilt firmware targets ESP32-S3.`,
+    chipMismatchConfirm: (detected: string, expected: string) =>
+      `Connected chip is "${detected}", which does not match target "${expected}". Continue flashing anyway?`,
+    catalogError: 'Could not load firmware catalog (catalog.json). You can still flash from "Upload Local .bin".',
+    catalogEmpty: 'No firmware matches your search.',
+    flashDoneLog: 'Flash complete! Board has been reset and serial port released (switch to Serial Monitor or reconnect to flash again).',
+    resetDoneLog: '\nBoard hard-reset and serial port released.\n',
   },
 } as const;
 
@@ -111,14 +137,18 @@ let baudrate = 460800;
 let eraseAll = false;
 let chip: ChipInfo | null = null;
 let catalog: CatalogEntry[] = [];
+let catalogError = false;
 let selectedId = '';
 let searchQuery = '';
 let localParts: LocalPart[] = [];
 let nextPartId = 1;
 let busy = false;
 let progressPct = 0;
+let progressState: 'idle' | 'flashing' | 'done' = 'idle';
 let progressLabel = '';
 let flashLogs = '';
+let copiedLog = false;
+let copiedTimer: number | undefined;
 
 let monBaud = 115200;
 let monConnected = false;
@@ -173,9 +203,9 @@ function parseHexOffset(s: string): number {
 function inferOffset(filename: string): string {
   const lower = filename.toLowerCase();
   if (lower.includes('partition')) return '0x8000';
-  if (lower.includes('boot_app0') || lower.includes('ota_data')) return '0xe000';
-  if (lower.includes('bootloader') || lower.includes('factory')) return '0x0';
-  if (lower.includes('firmware') || lower.includes('app')) return localParts.length === 0 ? '0x10000' : '0x10000';
+  if (lower.includes('boot_app0') || lower.includes('ota_data')) return '0xf000';
+  if (lower.includes('bootloader') || lower.includes('factory') || lower.includes('universal')) return '0x0';
+  if (lower.includes('firmware') || lower.includes('app') || lower.includes('usb_host_probe')) return '0x20000';
   return '0x0';
 }
 
@@ -189,12 +219,19 @@ function addLocalFiles(files: FileList | null) {
 
 async function loadCatalog() {
   try {
-    const r = await fetch('/firmwares/catalog.json', { cache: 'no-store' });
-    if (!r.ok) return;
+    const r = await fetch('./firmwares/catalog.json', { cache: 'no-store' });
+    if (!r.ok) {
+      catalog = [];
+      catalogError = true;
+      render();
+      return;
+    }
     catalog = (await r.json()) as CatalogEntry[];
+    catalogError = false;
     if (catalog.length && !selectedId) selectedId = catalog[0].id;
   } catch {
     catalog = [];
+    catalogError = true;
   }
   render();
 }
@@ -234,6 +271,7 @@ async function handleConnectFlasher() {
 
 async function handleErase() {
   if (!flasher.connected || busy) return;
+  if (!window.confirm(t().confirmErase)) return;
   busy = true;
   render();
   try {
@@ -248,11 +286,30 @@ async function handleErase() {
   }
 }
 
-async function handleFlash() {
+async function handleHardReset() {
   if (!flasher.connected || busy) return;
   busy = true;
+  render();
+  try {
+    await flasher.hardReset();
+    await flasher.disconnect();
+    chip = null;
+    appendFlashLog(t().resetDoneLog);
+  } catch (e) {
+    appendFlashLog(`\nReset failed: ${(e as Error).message}\n`);
+  } finally {
+    busy = false;
+    render();
+  }
+}
+
+async function handleFlash() {
+  if (!flasher.connected || busy) return;
+  const s = t();
+  busy = true;
   progressPct = 0;
-  progressLabel = t().flashing;
+  progressState = 'flashing';
+  progressLabel = s.flashing;
   render();
 
   try {
@@ -260,14 +317,22 @@ async function handleFlash() {
     if (sourceMode === 'catalog') {
       const entry = catalog.find((c) => c.id === selectedId);
       if (!entry) throw new Error('Select a firmware from the catalog');
+      if (chip && !chip.chipName.toUpperCase().includes(entry.chipFamily.toUpperCase())) {
+        if (!window.confirm(s.chipMismatchConfirm(chip.chipName, entry.chipFamily))) {
+          progressState = 'idle';
+          progressLabel = '';
+          return;
+        }
+      }
       for (const p of entry.partitions) {
-        appendFlashLog(`Fetching ${p.url}...\n`);
-        const res = await fetch(p.url, { cache: 'no-store' });
-        if (!res.ok) throw new Error(`${res.status} ${p.url} — ${t().missingBin}`);
+        const url = new URL(p.url.replace(/^\//, ''), document.baseURI).toString();
+        appendFlashLog(`Fetching ${url}...\n`);
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`${res.status} ${p.url} — ${s.missingBin}`);
         const buf = new Uint8Array(await res.arrayBuffer());
         // Guard against SPA HTML fallback being returned for missing .bin
         if (buf.length < 32 || (buf[0] === 0x3c && buf[1] === 0x21)) {
-          throw new Error(`${p.url} — ${t().missingBin}`);
+          throw new Error(`${p.url} — ${s.missingBin}`);
         }
         parts.push({ address: parseHexOffset(p.offset), data: buf, name: p.name });
       }
@@ -279,19 +344,38 @@ async function handleFlash() {
       }
     }
 
+    const partOffsets: number[] = [];
+    let totalBytes = 0;
+    for (const part of parts) {
+      partOffsets.push(totalBytes);
+      totalBytes += part.data.length;
+    }
+
     await flasher.flash(parts, eraseAll, (idx, written, total) => {
-      const pct = total > 0 ? Math.round((written / total) * 100) : 0;
-      progressPct = pct;
-      progressLabel = `${parts[idx]?.name || 'image'}: ${pct}% (${written}/${total})`;
+      const partPct = total > 0 ? Math.round((written / total) * 100) : 0;
+      const overallWritten = (partOffsets[idx] ?? 0) + written;
+      const overallPct = totalBytes > 0 ? Math.min(100, Math.round((overallWritten / totalBytes) * 100)) : partPct;
+      progressPct = overallPct;
+      progressState = 'flashing';
+      const prefix = parts.length > 1 ? `(${idx + 1}/${parts.length}) ` : '';
+      progressLabel = `${prefix}${parts[idx]?.name || 'image'}: ${partPct}% (${written}/${total})`;
       const bar = document.getElementById('flash-progress-bar');
       const lbl = document.getElementById('flash-progress-label');
-      if (bar) bar.style.width = `${pct}%`;
+      const pctEl = document.getElementById('flash-progress-pct');
+      if (bar) bar.style.width = `${overallPct}%`;
       if (lbl) lbl.textContent = progressLabel;
+      if (pctEl) pctEl.textContent = `${overallPct}%`;
     });
+
     progressPct = 100;
-    progressLabel = 'Done (100%)';
-    appendFlashLog('\nFlash completed and board reset!\n');
+    progressState = 'done';
+    progressLabel = '';
+    await flasher.disconnect();
+    chip = null;
+    appendFlashLog(`\n${s.flashDoneLog}\n`);
   } catch (e) {
+    progressState = 'idle';
+    progressLabel = '';
     appendFlashLog(`\nFlash failed: ${(e as Error).message}\n`);
   } finally {
     busy = false;
@@ -343,6 +427,13 @@ function render() {
     );
   });
 
+  const isS3Mismatch = chip !== null && !chip.chipName.toUpperCase().includes('ESP32-S3');
+  const canFlash = Boolean(
+    chip && !busy && (sourceMode === 'catalog' ? Boolean(selectedId) : localParts.length > 0),
+  );
+  const statusText =
+    progressState === 'idle' ? s.idle : progressState === 'done' ? s.done : progressLabel;
+
   root.innerHTML = `
     <div class="glow-bg"></div>
     <header class="topbar">
@@ -371,7 +462,7 @@ function render() {
           <section class="card stack">
             <div class="row">
               <h2 class="grow" style="margin:0">${esc(s.connTitle)}</h2>
-              <span class="pill ${chip ? 'ok' : 'warn'}">${esc(chip ? s.statusConnected : s.statusDisconnected)}</span>
+              <span class="pill ${chip ? (isS3Mismatch ? 'err' : 'ok') : 'warn'}">${esc(chip ? s.statusConnected : s.statusDisconnected)}</span>
             </div>
             <p class="small muted" style="margin:0">
               ${
@@ -380,6 +471,11 @@ function render() {
                   : esc(s.chipHint)
               }
             </p>
+            ${
+              chip && isS3Mismatch
+                ? `<div class="alert err small" style="margin:0">${esc(s.chipWarn(chip.chipName))}</div>`
+                : ''
+            }
             <label class="field">
               <span>${esc(s.baud)}</span>
               <select id="sel-baud" ${chip || busy ? 'disabled' : ''}>
@@ -409,7 +505,7 @@ function render() {
             <div class="row wrap">
               <button class="btn tab ${sourceMode === 'catalog' ? 'active' : ''}" id="src-catalog">${esc(s.fwSourceCatalog)}</button>
               <button class="btn tab ${sourceMode === 'local' ? 'active' : ''}" id="src-local">${esc(s.fwSourceLocal)}</button>
-              <button class="btn primary" style="margin-left:auto" id="btn-flash" ${!chip || busy ? 'disabled' : ''}>
+              <button class="btn primary" style="margin-left:auto" id="btn-flash" ${!canFlash ? 'disabled' : ''}>
                 ${esc(busy ? s.flashing : s.flashBtn)}
               </button>
             </div>
@@ -418,23 +514,29 @@ function render() {
               sourceMode === 'catalog'
                 ? `
               <input type="search" id="inp-search" value="${esc(searchQuery)}" placeholder="${esc(s.searchPlaceholder)}" />
-              <div class="catalog-grid">
-                ${filteredCatalog
-                  .map((c) => {
-                    const desc = lang === 'vi' ? c.descriptionVi : c.description;
-                    return `
-                    <button class="fw-card ${selectedId === c.id ? 'selected' : ''}" data-fw="${esc(c.id)}">
-                      <div class="row">
-                        <strong class="grow">${esc(c.name)}</strong>
-                        <span class="pill">${esc(c.version)}</span>
-                      </div>
-                      <div class="small muted">${esc(c.chipFamily)} · ${esc(c.badge)}</div>
-                      <div class="small">${esc(desc)}</div>
-                      <ul>${c.models.slice(0, 4).map((m) => `<li>${esc(m)}</li>`).join('')}</ul>
-                    </button>`;
-                  })
-                  .join('')}
-              </div>`
+              ${
+                catalogError
+                  ? `<div class="empty-state">${esc(s.catalogError)}</div>`
+                  : filteredCatalog.length === 0
+                    ? `<div class="empty-state">${esc(s.catalogEmpty)}</div>`
+                    : `<div class="catalog-grid">
+                        ${filteredCatalog
+                          .map((c) => {
+                            const desc = lang === 'vi' ? c.descriptionVi : c.description;
+                            return `
+                            <button class="fw-card ${selectedId === c.id ? 'selected' : ''}" data-fw="${esc(c.id)}">
+                              <div class="row">
+                                <strong class="grow">${esc(c.name)}</strong>
+                                <span class="pill">${esc(c.version)}</span>
+                              </div>
+                              <div class="small muted">${esc(c.chipFamily)} · ${esc(c.badge)}</div>
+                              <div class="small">${esc(desc)}</div>
+                              <ul>${c.models.map((m) => `<li>${esc(m)}</li>`).join('')}</ul>
+                            </button>`;
+                          })
+                          .join('')}
+                      </div>`
+              }`
                 : `
               <div class="dropzone stack" id="dropzone">
                 <div class="small muted">${esc(s.dropHint)}</div>
@@ -459,15 +561,15 @@ function render() {
 
             <div class="stack" style="gap:6px">
               <div class="row small muted">
-                <span class="grow" id="flash-progress-label">${esc(progressLabel || 'Idle')}</span>
-                <span>${progressPct}%</span>
+                <span class="grow" id="flash-progress-label">${esc(statusText)}</span>
+                <span id="flash-progress-pct">${progressPct}%</span>
               </div>
               <div class="progress-wrap"><div class="progress-bar" id="flash-progress-bar" style="width:${progressPct}%"></div></div>
             </div>
 
             <div class="row">
               <h3 class="grow" style="margin:0">${esc(s.logsTitle)}</h3>
-              <button class="btn" id="btn-copy-log">${esc(s.copy)}</button>
+              <button class="btn" id="btn-copy-log">${esc(copiedLog ? s.copied : s.copy)}</button>
               <button class="btn" id="btn-clear-log">${esc(s.clear)}</button>
             </div>
             <pre class="terminal" id="flash-terminal">${esc(flashLogs)}</pre>
@@ -476,7 +578,10 @@ function render() {
           : `
         <section class="card stack">
           <div class="row wrap">
-            <h2 class="grow" style="margin:0">${esc(s.serialTitle)}</h2>
+            <div class="row grow" style="min-width:180px">
+              <h2 style="margin:0">${esc(s.serialTitle)}</h2>
+              <span class="pill ${monConnected ? 'ok' : 'warn'}">${esc(monConnected ? s.serialConnected : s.serialDisconnected)}</span>
+            </div>
             <select id="sel-mon-baud" style="width:150px" ${monConnected ? 'disabled' : ''}>
               ${[115200, 921600, 460800, 230400, 74880, 9600]
                 .map((b) => `<option value="${b}" ${monBaud === b ? 'selected' : ''}>${b} baud</option>`)
@@ -507,6 +612,11 @@ function render() {
   `;
 
   bindEvents();
+
+  const flashTerm = document.getElementById('flash-terminal');
+  if (flashTerm) flashTerm.scrollTop = flashTerm.scrollHeight;
+  const serialTerm = document.getElementById('serial-terminal');
+  if (serialTerm && monAutoScroll) serialTerm.scrollTop = serialTerm.scrollHeight;
 }
 
 function bindEvents() {
@@ -531,7 +641,7 @@ function bindEvents() {
   });
   document.getElementById('btn-connect')?.addEventListener('click', () => void handleConnectFlasher());
   document.getElementById('btn-erase')?.addEventListener('click', () => void handleErase());
-  document.getElementById('btn-reset')?.addEventListener('click', () => void flasher.hardReset());
+  document.getElementById('btn-reset')?.addEventListener('click', () => void handleHardReset());
   document.getElementById('btn-flash')?.addEventListener('click', () => void handleFlash());
 
   document.getElementById('src-catalog')?.addEventListener('click', () => {
@@ -560,8 +670,15 @@ function bindEvents() {
 
   const fileInput = document.getElementById('file-bin') as HTMLInputElement | null;
   document.getElementById('btn-pick-bin')?.addEventListener('click', () => fileInput?.click());
-  fileInput?.addEventListener('change', () => addLocalFiles(fileInput.files));
+  fileInput?.addEventListener('change', () => {
+    addLocalFiles(fileInput.files);
+    fileInput.value = '';
+  });
   const dz = document.getElementById('dropzone');
+  dz?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).closest('#btn-pick-bin')) return;
+    fileInput?.click();
+  });
   dz?.addEventListener('dragover', (e) => {
     e.preventDefault();
     dz.classList.add('drag');
@@ -592,14 +709,35 @@ function bindEvents() {
     render();
   });
   document.getElementById('btn-copy-log')?.addEventListener('click', () => {
-    void navigator.clipboard?.writeText(flashLogs);
+    void (async () => {
+      try {
+        await navigator.clipboard?.writeText(flashLogs);
+        copiedLog = true;
+        if (copiedTimer !== undefined) window.clearTimeout(copiedTimer);
+        copiedTimer = window.setTimeout(() => {
+          copiedLog = false;
+          render();
+        }, 1800);
+        render();
+      } catch (e) {
+        appendFlashLog(`\nCopy failed: ${(e as Error).message}\n`);
+      }
+    })();
   });
 
   document.getElementById('sel-mon-baud')?.addEventListener('change', (e) => {
     monBaud = Number((e.target as HTMLSelectElement).value);
   });
   document.getElementById('btn-mon-connect')?.addEventListener('click', () => void handleConnectSerial());
-  document.getElementById('btn-mon-reset')?.addEventListener('click', () => void monitor.hardReset());
+  document.getElementById('btn-mon-reset')?.addEventListener('click', () => {
+    void (async () => {
+      try {
+        await monitor.hardReset();
+      } catch (e) {
+        appendMonitor(`\n[reset error: ${(e as Error).message}]\n`);
+      }
+    })();
+  });
   document.getElementById('chk-scroll')?.addEventListener('change', (e) => {
     monAutoScroll = (e.target as HTMLInputElement).checked;
   });
@@ -627,7 +765,13 @@ function bindEvents() {
     if (!inp || !monConnected) return;
     const text = inp.value;
     inp.value = '';
-    void monitor.send(text, monEnding);
+    void (async () => {
+      try {
+        await monitor.send(text, monEnding);
+      } catch (e) {
+        appendMonitor(`\n[send error: ${(e as Error).message}]\n`);
+      }
+    })();
   });
 }
 
