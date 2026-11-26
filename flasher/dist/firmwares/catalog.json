@@ -1,0 +1,79 @@
+[
+  {
+    "id": "universal-airprint",
+    "name": "Universal AirPrint & AirScan",
+    "version": "v1.2.0",
+    "chipFamily": "ESP32-S3",
+    "badge": "Universal",
+    "description": "All-in-one ESP32-S3-N16R8 AirPrint & AirScan firmware with auto-detection for Canon PIXMA, Canon LBP, HP LaserJet, Brother, and WiFi Captive Portal.",
+    "descriptionVi": "Firmware đa năng cho ESP32-S3-N16R8 hỗ trợ tự động nhận diện Canon PIXMA, Canon LBP, HP LaserJet, Brother kèm WiFi Captive Portal.",
+    "models": [
+      "Canon PIXMA MG2500 / MG2400 / MG2900 / MG3000 / E470 / E3100 / TS3100 / MP230-MP495 / MX340-MX420 (Print + Scan)",
+      "Canon LBP2900 / LBP3000 / LBP3050 / LBP6018L / LBP6030 / LBP6040 (CAPT)",
+      "HP LaserJet ZjStream: 1000, 1005, 1018, 1020, 1022, M1319, P1102, P1566, P1606dn, M12a",
+      "HP LaserJet XQX: P1005-P1009, P1505, P2014, M1005, M1120, M1132, M1136, M1212nf",
+      "Brother HL / DCP Monochrome Laser (HL-1110, HL-1210W, HL-2130, HL-2240, HL-L2300D, DCP-1510, DCP-1610W, DCP-L2520D)"
+    ],
+    "partitions": [
+      {
+        "offset": "0x0",
+        "url": "/firmwares/universal-airprint.bin",
+        "name": "universal-airprint.bin"
+      }
+    ]
+  },
+  {
+    "id": "canon-lbp-airprint",
+    "name": "Canon LBP AirPrint (CAPT)",
+    "version": "v1.2.0",
+    "chipFamily": "ESP32-S3",
+    "badge": "Canon CAPT",
+    "description": "Wireless AirPrint firmware profile for Canon LBP2900, LBP3000, LBP3050, LBP6018L, LBP6030, LBP6040 via CAPT/Hi-SCoA.",
+    "descriptionVi": "Profile biến máy in Canon LBP 2900, 3000, 3050, 6018L, 6030, 6040 thành máy in không dây qua giao thức CAPT.",
+    "models": ["Canon LBP2900", "Canon LBP3000", "Canon LBP3050", "Canon LBP6018L", "Canon LBP6030", "Canon LBP6040"],
+    "partitions": [
+      {
+        "offset": "0x0",
+        "url": "/firmwares/universal-airprint.bin",
+        "name": "universal-airprint.bin"
+      }
+    ]
+  },
+  {
+    "id": "hp-laserjet-airprint",
+    "name": "HP LaserJet AirPrint (ZjStream & XQX)",
+    "version": "v1.0.0",
+    "chipFamily": "ESP32-S3",
+    "badge": "HP LaserJet",
+    "description": "Wireless AirPrint profile for HP LaserJet ZjStream & XQX monochrome printers using ITU-T T.82 JBIG1 compression.",
+    "descriptionVi": "Profile biến máy in HP LaserJet (ZjStream & XQX) thành máy in không dây với nén JBIG1.",
+    "models": [
+      "ZjStream: 1000, 1005, 1018, 1020, 1022, M1319, P1102/w, P1566, P1606dn, M12a",
+      "XQX: P1005, P1006, P1007, P1008, P1009, P1505, P2014, M1005, M1120, M1132, M1136, M1212nf"
+    ],
+    "partitions": [
+      {
+        "offset": "0x0",
+        "url": "/firmwares/universal-airprint.bin",
+        "name": "universal-airprint.bin"
+      }
+    ]
+  },
+  {
+    "id": "brother-airprint",
+    "name": "Brother Laser AirPrint (Print Only)",
+    "version": "v1.0.0",
+    "chipFamily": "ESP32-S3",
+    "badge": "Brother",
+    "description": "Wireless AirPrint profile for Brother monochrome laser printers (print only; wireless scan not supported on Brother).",
+    "descriptionVi": "Profile biến máy in Brother laser đơn sắc thành máy in không dây (chưa hỗ trợ scan không dây).",
+    "models": ["Brother HL-1110", "HL-1210W", "HL-2130", "HL-2240", "HL-L2300D", "DCP-1510", "DCP-1610W", "DCP-L2520D"],
+    "partitions": [
+      {
+        "offset": "0x0",
+        "url": "/firmwares/universal-airprint.bin",
+        "name": "universal-airprint.bin"
+      }
+    ]
+  }
+]

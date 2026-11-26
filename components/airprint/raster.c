@@ -169,6 +169,7 @@ int raster_decode(raster_read_fn read, void *ctx, const raster_cb_t *cb, void *u
                     .height = (int)be32(ph + 16),
                     .dpi = (int)be32(ph + 20),
                     .bytes_pp = ph[0] / 8,
+                    .sides = ph[2] == 2 ? 1 : ph[2] == 3 ? 2 : 0,
                 };
                 if ((ph[0] != 8 && ph[0] != 24) || pg.width <= 0 || pg.height <= 0 || pg.width > 20000 ||
                     pg.height > 30000) {
@@ -196,12 +197,14 @@ int raster_decode(raster_read_fn read, void *ctx, const raster_cb_t *cb, void *u
             }
             uint32_t xres = be32(ph + 276), yres = be32(ph + 280);
             uint32_t bits_pp = be32(ph + 388), cspace = be32(ph + 400);
+            uint32_t pwg_duplex = be32(ph + 272), pwg_tumble = be32(ph + 368);
             raster_page_t pg = {
                 .page = pages + 1,
                 .width = (int)be32(ph + 372),
                 .height = (int)be32(ph + 376),
                 .dpi = (int)xres,
                 .bytes_pp = (int)bits_pp / 8,
+                .sides = pwg_duplex ? (pwg_tumble ? 2 : 1) : 0,
             };
             // supported: sgray_8 (colour space 18, 8 bpp), srgb_8 (19, 24 bpp)
             if (!((cspace == 18 && bits_pp == 8) || (cspace == 19 && bits_pp == 24)) || xres != yres) {

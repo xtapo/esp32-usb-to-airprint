@@ -49,6 +49,8 @@ typedef struct {
     int (*job_open)(void *ctx);                 // claim the printer, 0 = ok
     int (*job_write)(void *ctx, const uint8_t *data, size_t len);  // < 0 aborts
     int (*job_sync)(void *ctx, const char *what);   // a driver's handshake point (e.g. "StartJob"): flush + wait
+    int (*job_flush)(void *ctx);                // flush buffered OUT data, 0 = ok
+    int (*job_read)(void *ctx, uint8_t *buf, size_t len, int timeout_ms);  // raw bulk IN read
     void (*job_close)(void *ctx, bool ok);
     void (*job_cancel)(void *ctx);              // asynchronous cancel of the running job
     void (*job_state)(void *ctx, bool printing);    // e.g. LED

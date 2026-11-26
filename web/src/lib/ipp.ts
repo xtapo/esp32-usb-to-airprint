@@ -129,13 +129,17 @@ function user(): string {
   return 'Web browser';
 }
 
-export function printJobRequest(jobName: string, format: string): Uint8Array {
-  return encodeRequest(OP.PRINT_JOB, [
-    ['printer-uri', { tag: TAG.URI, value: printerUri() }],
-    ['requesting-user-name', { tag: TAG.NAME, value: user() }],
-    ['job-name', { tag: TAG.NAME, value: jobName.slice(0, 60) }],
-    ['document-format', { tag: TAG.MIMETYPE, value: format }],
-  ]);
+export function printJobRequest(jobName: string, format: string, sides?: string): Uint8Array {
+  return encodeRequest(
+    OP.PRINT_JOB,
+    [
+      ['printer-uri', { tag: TAG.URI, value: printerUri() }],
+      ['requesting-user-name', { tag: TAG.NAME, value: user() }],
+      ['job-name', { tag: TAG.NAME, value: jobName.slice(0, 60) }],
+      ['document-format', { tag: TAG.MIMETYPE, value: format }],
+    ],
+    sides ? [['sides', { tag: TAG.KEYWORD, value: sides }]] : [],
+  );
 }
 
 async function call(body: Uint8Array): Promise<IppResponse> {

@@ -155,8 +155,14 @@ static bool reattach(void)
 static void gather(oled_state_t *st)
 {
     memset(st, 0, sizeof(*st));
-    st->name = s_hostname;
-    st->wifi_configured = WIFI_SSID[0] != 0;
+    const char *hn = wifi_effective_hostname();
+    st->name = (hn && hn[0]) ? hn : s_hostname;
+    char ssid[33];
+    wifi_get_sta_ssid(ssid, sizeof(ssid));
+    st->wifi_configured = ssid[0] != 0;
+    st->ap_mode = wifi_ap_active();
+    if (st->ap_mode)
+        wifi_get_ap_ssid(st->ap_ssid, sizeof(st->ap_ssid));
     if (wifi_connected()) {
         wifi_get_ip(st->ip, sizeof(st->ip));
         st->rssi = wifi_rssi();

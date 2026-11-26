@@ -12,7 +12,17 @@ extern const printer_driver_t canon_mg2500_driver, canon_mg2400_driver, canon_p2
     canon_mg3000_driver, canon_e470_driver, canon_e460_driver, canon_ip2800_driver, canon_e3100_driver,
     canon_ts3100_driver, canon_mp230_driver, canon_ip2700_driver, canon_mp250_driver, canon_mp270_driver,
     canon_mp280_driver, canon_mp490_driver, canon_mp493_driver, canon_mp495_driver, canon_mx340_driver,
-    canon_mx350_driver, canon_mx360_driver, canon_mx410_driver, canon_mx420_driver;
+    canon_mx350_driver, canon_mx360_driver, canon_mx410_driver, canon_mx420_driver,
+    canon_lbp2900_driver, canon_lbp3000_driver, canon_lbp3050_driver, canon_lbp3300_driver,
+    canon_lbp6018_driver, canon_lbp6030_driver, canon_lbp6040_driver,
+    hp_lj1000_driver, hp_lj1005_driver, hp_lj1018_driver, hp_lj1020_driver, hp_lj1022_driver,
+    hp_m1319_driver, hp_p1102_driver, hp_p1102w_driver, hp_p1566_driver, hp_p1606dn_driver, hp_m12_driver,
+    hp_p1005_driver, hp_p1006_driver, hp_p1007_driver, hp_p1008_driver, hp_p1009_driver,
+    hp_p1505_driver, hp_p2014_driver, hp_m1005_driver, hp_m1120_driver, hp_m1132_driver,
+    hp_m1136_driver, hp_m1212nf_driver,
+    brother_hl1110_driver, brother_hl1210w_driver, brother_hl2130_driver, brother_hl2240_driver,
+    brother_hll2300d_driver, brother_dcp1510_driver, brother_dcp1610w_driver, brother_dcpl2520d_driver,
+    brother_generic_driver;
 
 const printer_driver_t *const printer_drivers[] = {
     &canon_mg2500_driver, &canon_mg2400_driver, &canon_p200_driver, &canon_mg2900_driver, &canon_mg3000_driver,
@@ -20,6 +30,16 @@ const printer_driver_t *const printer_drivers[] = {
     &canon_mp230_driver, &canon_ip2700_driver, &canon_mp250_driver, &canon_mp270_driver, &canon_mp280_driver,
     &canon_mp490_driver, &canon_mp493_driver, &canon_mp495_driver, &canon_mx340_driver, &canon_mx350_driver,
     &canon_mx360_driver, &canon_mx410_driver, &canon_mx420_driver,
+    &canon_lbp2900_driver, &canon_lbp3000_driver, &canon_lbp3050_driver, &canon_lbp3300_driver,
+    &canon_lbp6018_driver, &canon_lbp6030_driver, &canon_lbp6040_driver,
+    &hp_lj1000_driver, &hp_lj1005_driver, &hp_lj1018_driver, &hp_lj1020_driver, &hp_lj1022_driver,
+    &hp_m1319_driver, &hp_p1102_driver, &hp_p1102w_driver, &hp_p1566_driver, &hp_p1606dn_driver, &hp_m12_driver,
+    &hp_p1005_driver, &hp_p1006_driver, &hp_p1007_driver, &hp_p1008_driver, &hp_p1009_driver,
+    &hp_p1505_driver, &hp_p2014_driver, &hp_m1005_driver, &hp_m1120_driver, &hp_m1132_driver,
+    &hp_m1136_driver, &hp_m1212nf_driver,
+    &brother_hl1110_driver, &brother_hl1210w_driver, &brother_hl2130_driver, &brother_hl2240_driver,
+    &brother_hll2300d_driver, &brother_dcp1510_driver, &brother_dcp1610w_driver, &brother_dcpl2520d_driver,
+    &brother_generic_driver,
     NULL,
 };
 
@@ -64,7 +84,8 @@ static bool same_model(const char *a, const char *b)
 const printer_driver_t *printer_driver_match(uint16_t vid, uint16_t pid, const char *device_id)
 {
     for (int i = 0; printer_drivers[i]; i++)
-        if (printer_drivers[i]->usb_vid && printer_drivers[i]->usb_vid == vid && printer_drivers[i]->usb_pid == pid)
+        if (printer_drivers[i]->usb_vid && printer_drivers[i]->usb_pid &&
+            printer_drivers[i]->usb_vid == vid && printer_drivers[i]->usb_pid == pid)
             return printer_drivers[i];
     char mfg[32], mdl[64];
     device_id_field(device_id, "MFG", "MANUFACTURER", mfg, sizeof(mfg));
@@ -74,5 +95,7 @@ const printer_driver_t *printer_driver_match(uint16_t vid, uint16_t pid, const c
         if (d->usb_mdl && same_model(d->usb_mdl, mdl) && (!mfg[0] || !d->usb_mfg || !strcasecmp(d->usb_mfg, mfg)))
             return d;
     }
+    if (vid == 0x04f9 || (mfg[0] && !strcasecmp(mfg, "Brother")))
+        return &brother_generic_driver;
     return NULL;
 }

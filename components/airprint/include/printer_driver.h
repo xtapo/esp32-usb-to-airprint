@@ -20,6 +20,12 @@ extern "C" {
 
 #define PRINTER_MAX_RESOLUTIONS 4
 
+enum {
+    PRINTER_SIDES_ONE_SIDED = 0,
+    PRINTER_SIDES_TWO_SIDED_LONG_EDGE = 1,
+    PRINTER_SIDES_TWO_SIDED_SHORT_EDGE = 2,
+};
+
 // Where the printer data goes. Set up by the caller of job_begin/test_page.
 typedef struct {
     // the printer's bytes, in order; < 0 aborts the job
@@ -30,6 +36,12 @@ typedef struct {
     int (*sync)(void *ctx, const char *what);
     // optional: called every 64 lines of a test page (yield, log progress)
     void (*progress)(void *ctx, int line, int lines);
+    // optional: flush buffered OUT data before reading a reply; 0 = ok, < 0 = error
+    int (*flush)(void *ctx);
+    // optional: synchronous raw bulk IN read for bidirectional binary protocols
+    // (e.g. Canon CAPT). Returns bytes read (>0), 0 on timeout, <0 on error.
+    int (*read)(void *ctx, uint8_t *buf, size_t len, int timeout_ms);
+    int sides;                  // PRINTER_SIDES_* (0 = one-sided default)
     void *ctx;
 } printer_io_t;
 
@@ -47,6 +59,7 @@ typedef struct printer_driver {
     uint16_t usb_vid, usb_pid;  // the device's USB ids, 0 = unknown (matched by usb_mdl)
     bool color;                 // colour printing (else gray only)
     bool scanner;               // the device has a Canon pixma scanner (components/scanner)
+    bool duplex;                // supports automatic two-sided printing
     int resolutions[PRINTER_MAX_RESOLUTIONS];   // dpi, ascending; the last is the default
     int nresolutions;
     const printer_paper_t *papers;              // the first is the default

@@ -116,6 +116,38 @@ static void send_oled(airprint_http_t *h)
     airprint_http_send(h, "200 OK", "image/x-portable-bitmap", pbm, (size_t)n);
 }
 
+static bool mock_wifi_http(airprint_http_t *h, const char *method, const char *path)
+{
+    if (!strcmp(method, "GET") && !strcmp(path, "/api/wifi")) {
+        int ndrv = 0;
+        while (printer_drivers[ndrv])
+            ndrv++;
+        char buf[512];
+        int n = snprintf(buf, sizeof(buf),
+                         "{\"connected\":true,\"ap_active\":false,\"rssi\":-52,\"ssid\":\"Host-Test-WiFi\","
+                         "\"ip\":\"127.0.0.1\",\"ap_ssid\":\"AirPrint-Setup-HOST\",\"ap_ip\":\"192.168.4.1\","
+                         "\"hostname\":\"airprint-host\",\"printer_name\":\"Host Test Printer\","
+                         "\"driver\":\"canon-mg2500\",\"model\":\"Canon MG2500 series\",\"driver_count\":%d}",
+                         ndrv);
+        airprint_http_send_ex(h, "200 OK", "application/json", "Cache-Control: no-store\r\n", buf, (size_t)n);
+        return true;
+    }
+    if (!strcmp(method, "GET") && !strcmp(path, "/api/wifi/scan")) {
+        static const char scan[] = "{\"networks\":[{\"ssid\":\"HomeWiFi\",\"rssi\":-48,\"secure\":true},"
+                                   "{\"ssid\":\"Office_2.4G\",\"rssi\":-64,\"secure\":true}]}";
+        airprint_http_send_ex(h, "200 OK", "application/json", "Cache-Control: no-store\r\n", scan, sizeof(scan) - 1);
+        return true;
+    }
+    if (!strcmp(method, "POST") && (!strcmp(path, "/api/wifi") || !strcmp(path, "/api/wifi/reset"))) {
+        char tmp[256];
+        airprint_http_read_body(h, tmp, sizeof(tmp));
+        static const char ok[] = "{\"ok\":true,\"rebooting\":false}";
+        airprint_http_send(h, "200 OK", "application/json", ok, sizeof(ok) - 1);
+        return true;
+    }
+    return false;
+}
+
 static bool http_handler(void *ctx, airprint_http_t *h, const char *method, const char *path)
 {
     fprintf(stderr, "host: %s %s (Host: %s)\n", method, path, airprint_http_host(h));
@@ -123,7 +155,8 @@ static bool http_handler(void *ctx, airprint_http_t *h, const char *method, cons
         send_oled(h);
         return true;
     }
-    return scan_service_http(h, method, path) || events_http(h, method, path) || webui_http(h, method, path);
+    return mock_wifi_http(h, method, path) || scan_service_http(h, method, path) ||
+           events_http(h, method, path) || webui_http(h, method, path);
 }
 
 static volatile sig_atomic_t s_button;

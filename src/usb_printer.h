@@ -48,6 +48,11 @@ esp_err_t usb_printer_flush(void);
 // ESP_OK = found, ESP_ERR_TIMEOUT = not seen in time, ESP_ERR_NOT_SUPPORTED =
 // the printer has no bulk IN endpoint.
 esp_err_t usb_printer_wait_response(const char *needle, uint32_t timeout_ms);
+// Synchronous raw bulk IN read for binary printer protocols (e.g. Canon CAPT).
+// Returns bytes read (> 0), 0 on timeout, < 0 on error / no bulk IN endpoint.
+int usb_printer_read(uint8_t *buf, size_t len, uint32_t timeout_ms);
+// Enable/disable background Canon IVEC status polling (disable for CAPT / PCL / ZjStream).
+void usb_printer_set_ivec_polling(bool enable);
 void usb_printer_job_end(void);
 
 // Abort a running job from any task: stops pending transfers and makes the

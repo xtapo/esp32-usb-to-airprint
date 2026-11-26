@@ -186,6 +186,14 @@ static void render(const char *dir)
     s.started = false;
     sc[n++] = (scenario_t){"no-wifi", s};
 
+    s = base();
+    s.wifi_configured = false;
+    s.ap_mode = true;
+    strcpy(s.ap_ssid, "AirPrint-Setup-A1B2");
+    s.ip[0] = 0;
+    s.started = true;
+    sc[n++] = (scenario_t){"ap-setup", s};
+
     uint8_t fb[OLED_FB_SIZE];
     for (int i = 0; i < n; i++) {
         oled_ui_render(&sc[i].st, fb);

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeResponse, encodeRequest, OP } from '../src/lib/ipp.ts';
+import { decodeResponse, encodeRequest, OP, printJobRequest } from '../src/lib/ipp.ts';
 import { imageDpi } from '../src/lib/imageinfo.ts';
 import { detectContent } from '../src/lib/autocrop.ts';
 
@@ -13,6 +13,20 @@ test('request layout', () => {
   const d = decodeResponse(r.buffer as ArrayBuffer);
   assert.deepEqual(d.attrs['attributes-charset'], ['utf-8']);
   assert.deepEqual(d.attrs['job-id'], [258]);
+});
+
+test('printJobRequest includes sides in job attributes when specified', () => {
+  const prev = (globalThis as { location?: { host: string } }).location;
+  (globalThis as { location?: { host: string } }).location = { host: 'localhost' };
+  try {
+    const r = printJobRequest('doc.pdf', 'image/urf', 'two-sided-long-edge');
+    assert.ok(r.includes(0x02)); // TAG.JOB group
+    const d = decodeResponse(r.buffer as ArrayBuffer);
+    assert.deepEqual(d.attrs['sides'], ['two-sided-long-edge']);
+  } finally {
+    if (prev === undefined) delete (globalThis as { location?: unknown }).location;
+    else (globalThis as { location?: { host: string } }).location = prev;
+  }
 });
 
 test('JFIF dpi', () => {

@@ -24,6 +24,8 @@
 #include "status_led.h"
 #include "usb_printer.h"
 #include "webui.h"
+#include "wifi.h"
+#include "wifi_portal.h"
 
 static const char *TAG = "airprint_esp";
 
@@ -115,6 +117,16 @@ static int job_write(void *ctx, const uint8_t *data, size_t len)
 static int job_sync(void *ctx, const char *what)
 {
     return print_job_sync(what);
+}
+
+static int job_flush(void *ctx)
+{
+    return usb_printer_flush() == ESP_OK ? 0 : -1;
+}
+
+static int job_read(void *ctx, uint8_t *buf, size_t len, int timeout_ms)
+{
+    return usb_printer_read(buf, len, timeout_ms > 0 ? (uint32_t)timeout_ms : 1000);
 }
 
 static void job_close(void *ctx, bool ok)
@@ -226,7 +238,8 @@ static void dev_job_close(void *ctx, bool ok)
 
 static bool web_http(airprint_http_t *h, const char *method, const char *path)
 {
-    return scan_service_http(h, method, path) || events_http(h, method, path) || webui_http(h, method, path);
+    return wifi_portal_http(h, method, path) || scan_service_http(h, method, path) ||
+           events_http(h, method, path) || webui_http(h, method, path);
 }
 
 static bool dev_http(void *ctx, airprint_http_t *h, const char *method, const char *path)
@@ -348,7 +361,7 @@ static esp_err_t announce(const char *hostname)
         {"URF", urf},
         {"UUID", s_uuid},
         {"Color", drv->color ? "T" : "F"},
-        {"Duplex", "F"},
+        {"Duplex", drv->duplex ? "T" : "F"},
         {"Copies", "F"},
         {"kind", "document"},
         {"PaperMax", "<legal-A4"},     // up to A4
@@ -361,15 +374,16 @@ static esp_err_t announce(const char *hostname)
         {"Scan", drv->scanner ? "T" : "F"},    // the eSCL scanner below, same UUID
         {"Fax", "F"},
     };
-    err = mdns_service_add(PRINTER_NAME, "_ipp", "_tcp", IPP_PORT, txt, sizeof(txt) / sizeof(txt[0]));
+    const char *pname = wifi_effective_printer_name();
+    err = mdns_service_add(pname, "_ipp", "_tcp", IPP_PORT, txt, sizeof(txt) / sizeof(txt[0]));
     if (err != ESP_OK)
         return err;
     // "_universal" is what iOS looks for; "_print" is IPP Everywhere
-    mdns_service_subtype_add_for_host(PRINTER_NAME, "_ipp", "_tcp", NULL, "_universal");
-    mdns_service_subtype_add_for_host(PRINTER_NAME, "_ipp", "_tcp", NULL, "_print");
+    mdns_service_subtype_add_for_host(pname, "_ipp", "_tcp", NULL, "_universal");
+    mdns_service_subtype_add_for_host(pname, "_ipp", "_tcp", NULL, "_print");
 
     if (!drv->scanner) {
-        ESP_LOGI(TAG, "announced \"%s\" as %s.local:%d", PRINTER_NAME, hostname, IPP_PORT);
+        ESP_LOGI(TAG, "announced \"%s\" as %s.local:%d", pname, hostname, IPP_PORT);
         return ESP_OK;
     }
     // eSCL scanner (AirScan): macOS Image Capture / Preview, sane-airscan, Windows
@@ -389,10 +403,10 @@ static esp_err_t announce(const char *hostname)
         {"adminurl", adminurl},
         {"representation", icon},
     };
-    err = mdns_service_add(PRINTER_NAME, "_uscan", "_tcp", WEB_PORT, scan_txt, sizeof(scan_txt) / sizeof(scan_txt[0]));
+    err = mdns_service_add(pname, "_uscan", "_tcp", WEB_PORT, scan_txt, sizeof(scan_txt) / sizeof(scan_txt[0]));
     if (err != ESP_OK)
         ESP_LOGW(TAG, "cannot announce the scanner: %s", esp_err_to_name(err));
-    ESP_LOGI(TAG, "announced \"%s\" as %s.local:%d", PRINTER_NAME, hostname, IPP_PORT);
+    ESP_LOGI(TAG, "announced \"%s\" as %s.local:%d", pname, hostname, IPP_PORT);
     return ESP_OK;
 }
 
@@ -402,7 +416,7 @@ static esp_err_t start_mdns(const char *hostname)
     if (err != ESP_OK)
         return err;
     mdns_hostname_set(hostname);
-    mdns_instance_name_set(PRINTER_NAME);
+    mdns_instance_name_set(wifi_effective_printer_name());
     return announce(hostname);
 }
 
@@ -452,7 +466,7 @@ esp_err_t airprint_esp_start(const char *hostname, void (*on_job_state)(bool pri
     ESP_LOGI(TAG, "printer driver: %s (%s)", drv->id, drv->make_model);
     snprintf(s_hostname, sizeof(s_hostname), "%s", hostname);
     s_cfg = (airprint_config_t){
-        .name = PRINTER_NAME,
+        .name = wifi_effective_printer_name(),
         .uuid = s_uuid,
         .port = IPP_PORT,
         .web_port = WEB_PORT,
@@ -460,6 +474,8 @@ esp_err_t airprint_esp_start(const char *hostname, void (*on_job_state)(bool pri
         .job_open = job_open,
         .job_write = job_write,
         .job_sync = job_sync,
+        .job_flush = job_flush,
+        .job_read = job_read,
         .job_close = job_close,
         .job_cancel = job_cancel,
         .job_state = job_state,

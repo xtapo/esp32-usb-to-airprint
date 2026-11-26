@@ -127,3 +127,10 @@ test('a line of 4961 different pixels', () => {
   const [pg] = decode(encode(src, w, 1, false));
   for (let x = 0; x < w; x++) assert.equal(pg.px[x * 3], x & 255);
 });
+
+test('urfPageHeader encodes duplex byte at offset 2', () => {
+  assert.equal(urfPageHeader({ width: 100, height: 100, dpi: 600, gray: true })[2], 1);
+  assert.equal(urfPageHeader({ width: 100, height: 100, dpi: 600, gray: true, sides: 'one-sided' })[2], 1);
+  assert.equal(urfPageHeader({ width: 100, height: 100, dpi: 600, gray: true, sides: 'two-sided-long-edge' })[2], 2);
+  assert.equal(urfPageHeader({ width: 100, height: 100, dpi: 600, gray: true, sides: 'two-sided-short-edge' })[2], 3);
+});

@@ -10,15 +10,22 @@
   import ScannerView from './views/ScannerView.svelte';
   import FilesView from './views/FilesView.svelte';
   import ProcessView from './views/ProcessView.svelte';
+  import WifiView from './views/WifiView.svelte';
   import { connect, device } from './lib/device.svelte';
   import { loadFiles } from './lib/files.svelte';
   import { loadWork } from './lib/process.svelte';
   import { initScanSync } from './lib/scan.svelte';
   import { ui } from './lib/ui.svelte';
 
-  const ROUTES = ['printer', 'scanner', 'files', 'process'] as const;
+  const ROUTES = ['printer', 'scanner', 'files', 'process', 'wifi'] as const;
   type Route = (typeof ROUTES)[number];
-  const TITLES: Record<Route, string> = { printer: 'Printer', scanner: 'Scanner', files: 'Files', process: 'Process' };
+  const TITLES: Record<Route, string> = {
+    printer: 'Printer',
+    scanner: 'Scanner',
+    files: 'Files',
+    process: 'Process',
+    wifi: 'WiFi',
+  };
 
   let hash = $state(location.hash);
   let narrow = $state(false);
@@ -66,8 +73,10 @@
           <ScannerView />
         {:else if current === 'files'}
           <FilesView />
-        {:else}
+        {:else if current === 'process'}
           <ProcessView />
+        {:else}
+          <WifiView />
         {/if}
       </div>
     </main>

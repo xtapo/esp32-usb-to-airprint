@@ -15,6 +15,7 @@ typedef struct {
     int width, height;  // pixels
     int dpi;            // x and y resolution (must be equal)
     int bytes_pp;       // 1 = 8-bit gray, 3 = 8-bit sRGB (white = 0xff)
+    int sides;          // 0 = one-sided/unspecified, 1 = long-edge, 2 = short-edge
 } raster_page_t;
 
 typedef struct {

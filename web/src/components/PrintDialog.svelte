@@ -20,6 +20,7 @@
     type PaperId,
   } from '../lib/layout';
   import { renderJob, sendJob, type PrintOptions } from '../lib/print';
+  import type { Sides } from '../lib/urf';
   import { whiteCanvas, type Source } from '../lib/source';
   import { toast } from '../lib/ui.svelte';
 
@@ -44,6 +45,7 @@
   let fit = $state<Fit>(file.source === 'scan' && file.dpi ? 'actual' : 'fit'); // a scan: a 1:1 copy
   let gray = $state<boolean>(saved.gray ?? false);
   let dpi = $state<300 | 600>(saved.dpi || 600);
+  let sides = $state<Sides>('one-sided');
   let pageIdx = $state(0);
   let previewEl: HTMLDivElement;
 
@@ -63,6 +65,15 @@
   const count = $derived(src?.pages.length ?? file.pages ?? 1);
   const selected = $derived(parseRanges(range, count));
   const p = $derived(device.printer);
+  const supportsColor = $derived(p?.color !== false);
+  const supportsDuplex = $derived(p?.duplex === true);
+  const supports300 = $derived(!p?.resolutions?.length || p.resolutions.includes(300));
+  const supports600 = $derived(!p?.resolutions?.length || p.resolutions.includes(600));
+  const effectiveGray = $derived(!supportsColor || gray);
+  const effectiveSides = $derived<Sides>(supportsDuplex ? sides : 'one-sided');
+  const effectiveDpi = $derived<300 | 600>(
+    dpi === 300 && !supports300 && supports600 ? 600 : dpi === 600 && !supports600 && supports300 ? 300 : dpi,
+  );
   const blocker = $derived.by(() => {
     if (!device.online) return 'The printer box is not reachable.';
     if (!p?.connected) return 'No printer is connected to the printer box.';
@@ -87,7 +98,7 @@
   let previewToken = 0;
   $effect(() => {
     const s = src;
-    const opts = { paper, fit, orientation, pageIdx, gray };
+    const opts = { paper, fit, orientation, pageIdx, gray: effectiveGray };
     if (!s || !previewEl) return;
     const token = ++previewToken;
     const P = PAPERS[opts.paper];
@@ -112,7 +123,16 @@
 
   async function print() {
     if (!src || !selected?.length) return;
-    const o: PrintOptions = { paper, fit, orientation, pages: selected, copies, gray, dpi };
+    const o: PrintOptions = {
+      paper,
+      fit,
+      orientation,
+      pages: selected,
+      copies,
+      gray: effectiveGray,
+      dpi: effectiveDpi,
+      sides: effectiveSides,
+    };
     abort = new AbortController();
     const signal = abort.signal;
     const sheets = selected.length * copies;
@@ -142,6 +162,7 @@
           }
         },
         signal,
+        effectiveSides,
       );
       toast(`Printed ${sheets} page${sheets === 1 ? '' : 's'} of ${name}`, 'ok');
       if (!closed) onclose();
@@ -248,19 +269,39 @@
         </div>
         <div class="field">
           <span class="label">Color</span>
-          <div class="seg">
-            <button class:on={!gray} onclick={() => (gray = false)}>Color</button>
-            <button class:on={gray} onclick={() => (gray = true)}>Black &amp; white</button>
-          </div>
+          {#if supportsColor}
+            <div class="seg">
+              <button class:on={!gray} onclick={() => (gray = false)}>Color</button>
+              <button class:on={gray} onclick={() => (gray = true)}>Black &amp; white</button>
+            </div>
+          {:else}
+            <span class="small muted">Monochrome printer (black &amp; white only).</span>
+          {/if}
         </div>
         <div class="field">
           <span class="label">Quality</span>
           <div class="seg">
-            <button class:on={dpi === 600} onclick={() => (dpi = 600)}>Standard · 600 dpi</button>
-            <button class:on={dpi === 300} onclick={() => (dpi = 300)}>Fast · 300 dpi</button>
+            {#if supports600}
+              <button class:on={effectiveDpi === 600} onclick={() => (dpi = 600)}>Standard · 600 dpi</button>
+            {/if}
+            {#if supports300}
+              <button class:on={effectiveDpi === 300} onclick={() => (dpi = 300)}>Fast · 300 dpi</button>
+            {/if}
           </div>
-          <span class="small muted">300 dpi sends a quarter of the data: quicker for photos.</span>
+          {#if supports300 && supports600}
+            <span class="small muted">300 dpi sends a quarter of the data: quicker for photos.</span>
+          {/if}
         </div>
+        {#if supportsDuplex}
+          <div class="field">
+            <span class="label">Sides</span>
+            <div class="seg">
+              <button class:on={sides === 'one-sided'} onclick={() => (sides = 'one-sided')}>1-sided</button>
+              <button class:on={sides === 'two-sided-long-edge'} onclick={() => (sides = 'two-sided-long-edge')}>2-sided (long)</button>
+              <button class:on={sides === 'two-sided-short-edge'} onclick={() => (sides = 'two-sided-short-edge')}>2-sided (short)</button>
+            </div>
+          </div>
+        {/if}
       </fieldset>
     </div>
   </div>

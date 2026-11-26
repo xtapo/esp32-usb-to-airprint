@@ -3,6 +3,7 @@
   import ScanLine from '@lucide/svelte/icons/scan-line';
   import FolderOpen from '@lucide/svelte/icons/folder-open';
   import Layers from '@lucide/svelte/icons/layers';
+  import Wifi from '@lucide/svelte/icons/wifi';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import { device } from '../lib/device.svelte';
   import { files } from '../lib/files.svelte';
@@ -48,6 +49,13 @@
       icon: Layers,
       line: work.items.length ? `${work.items.length} page${work.items.length === 1 ? '' : 's'}` : 'Empty',
       desc: 'Rotate, crop, ID card copies, PDF',
+    },
+    {
+      id: 'wifi',
+      label: 'WiFi',
+      icon: Wifi,
+      line: device.online ? 'Network & AP' : 'Setup',
+      desc: 'Connect WiFi and AirPrint settings',
     },
   ]);
 

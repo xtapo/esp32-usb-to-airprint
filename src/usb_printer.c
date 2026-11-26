@@ -64,6 +64,12 @@ typedef struct {
     atomic_int out_inflight;            // OUT transfers submitted, not completed
     volatile bool in_inflight;
     bool in_stopped;                    // IN endpoint failed, stop polling
+    volatile bool ivec_poll;            // Canon IVEC status polling enabled
+    volatile bool raw_in_active;        // synchronous raw bulk IN read in progress
+    SemaphoreHandle_t in_sem;           // signalled by in_cb when raw_in_active
+    uint8_t raw_in_buf[IN_XFER_SIZE];   // leftover bytes from previous bulk IN packet
+    size_t raw_in_pos, raw_in_len;
+    bool port_status_bad;               // printer stalled GET_PORT_STATUS (EP0)
     TickType_t in_last;                 // when the last IN read completed
     volatile bool ctrl_done;
     SemaphoreHandle_t ctrl_sem;
@@ -182,6 +188,10 @@ static void in_cb(usb_transfer_t *xfer)
 {
     s_p.in_inflight = false;
     s_p.in_last = xTaskGetTickCount();
+    if (s_p.raw_in_active) {
+        xSemaphoreGive(s_p.in_sem);
+        return;
+    }
     if (xfer->status == USB_TRANSFER_STATUS_COMPLETED && xfer->actual_num_bytes > 0) {
         size_t n = xfer->actual_num_bytes;
         if (s_p.msg_len + n >= MSG_BUF_SIZE) {
@@ -535,12 +545,16 @@ static void open_device(uint8_t addr)
         ESP_LOGW(TAG, "GET_DEVICE_ID failed");
     }
     uint8_t st;
-    if (usb_printer_port_status(&st) == ESP_OK)
+    s_p.port_status_bad = false;
+    if (usb_printer_port_status(&st) == ESP_OK) {
         ESP_LOGI(TAG, "port status 0x%02x (%s%s%s)", st, (st & 0x20) ? "paper empty " : "",
                  (st & 0x10) ? "selected " : "", (st & 0x08) ? "no error" : "ERROR");
+    } else {
+        s_p.port_status_bad = true;
+    }
 
-    if (info.vid != CANON_VID)
-        ESP_LOGW(TAG, "not a Canon printer: Canon raster jobs will print garbage on it");
+    if (info.vid != CANON_VID && info.vid != 0x03f0 && info.vid != 0x04f9)
+        ESP_LOGW(TAG, "unknown printer vendor %04x: falling back to default driver", info.vid);
 
     xSemaphoreTake(s_p.lock, portMAX_DELAY);
     s_p.info = info;
@@ -548,13 +562,18 @@ static void open_device(uint8_t addr)
     s_p.resp[0] = 0;
     xSemaphoreGive(s_p.lock);
     s_p.msg_len = 0;
+    s_p.raw_in_pos = 0;
+    s_p.raw_in_len = 0;
     s_p.last_status[0] = 0;
     memset(&s_p.status, 0, sizeof(s_p.status));
     s_p.in_stopped = false;
+    s_p.raw_in_active = false;
+    s_p.ivec_poll = (info.vid == CANON_VID && strstr(info.device_id, "IVEC") != NULL);
     s_p.connected = true;
-    in_submit();
     if (s_p.conn_cb)
         s_p.conn_cb(true, &info);
+    if (s_p.ivec_poll)
+        in_submit();
 }
 
 static void abort_endpoint(uint8_t ep)
@@ -584,7 +603,8 @@ static void client_task(void *arg)
             s_p.pending_addr = 0;
             open_device(addr);
         }
-        if (s_p.connected && !s_p.gone && !s_p.in_inflight && !s_p.scan_active &&
+        if (s_p.connected && !s_p.gone && s_p.ivec_poll && !s_p.raw_in_active && !s_p.in_inflight &&
+            !s_p.scan_active &&
             xTaskGetTickCount() - s_p.in_last >= pdMS_TO_TICKS(s_p.job_active ? IN_POLL_JOB_MS : IN_POLL_IDLE_MS))
             in_submit();
         if (s_p.gone && !teardown) {
@@ -631,10 +651,12 @@ esp_err_t usb_printer_start(usb_printer_conn_cb_t cb)
     s_p.lock = xSemaphoreCreateMutex();
     s_p.ctrl_mutex = xSemaphoreCreateMutex();
     s_p.ctrl_sem = xSemaphoreCreateBinary();
+    s_p.in_sem = xSemaphoreCreateBinary();
     s_p.out_free = xQueueCreate(OUT_XFER_COUNT, sizeof(usb_transfer_t *));
     s_p.scan_out_sem = xSemaphoreCreateBinary();
     s_p.scan_in_sem = xSemaphoreCreateBinary();
-    if (!s_p.lock || !s_p.ctrl_mutex || !s_p.ctrl_sem || !s_p.out_free || !s_p.scan_out_sem || !s_p.scan_in_sem)
+    if (!s_p.lock || !s_p.ctrl_mutex || !s_p.ctrl_sem || !s_p.in_sem || !s_p.out_free || !s_p.scan_out_sem ||
+        !s_p.scan_in_sem)
         return ESP_ERR_NO_MEM;
 
     const usb_host_config_t host_cfg = {.skip_phy_setup = false, .intr_flags = ESP_INTR_FLAG_LEVEL1};
@@ -710,6 +732,8 @@ esp_err_t usb_printer_job_begin(void)
     s_p.cancel = false;
     s_p.out_status = USB_TRANSFER_STATUS_COMPLETED;
     s_p.fill = NULL;
+    s_p.raw_in_pos = 0;
+    s_p.raw_in_len = 0;
     xSemaphoreTake(s_p.lock, portMAX_DELAY);
     s_p.resp_len = 0;
     s_p.resp[0] = 0;
@@ -825,6 +849,73 @@ esp_err_t usb_printer_wait_response(const char *needle, uint32_t timeout_ms)
     return ESP_ERR_TIMEOUT;
 }
 
+void usb_printer_set_ivec_polling(bool enable)
+{
+    s_p.ivec_poll = enable;
+    if (enable && s_p.connected && !s_p.gone && !s_p.in_inflight && !s_p.raw_in_active && !s_p.scan_active)
+        in_submit();
+}
+
+int usb_printer_read(uint8_t *buf, size_t len, uint32_t timeout_ms)
+{
+    if (!buf || len == 0 || !s_p.connected || s_p.gone || !s_p.ep_in || s_p.in_stopped || s_p.cancel)
+        return -1;
+    if (s_p.raw_in_pos < s_p.raw_in_len) {
+        size_t avail = s_p.raw_in_len - s_p.raw_in_pos;
+        size_t take = avail < len ? avail : len;
+        memcpy(buf, s_p.raw_in_buf + s_p.raw_in_pos, take);
+        s_p.raw_in_pos += take;
+        if (s_p.raw_in_pos == s_p.raw_in_len)
+            s_p.raw_in_pos = s_p.raw_in_len = 0;
+        return (int)take;
+    }
+    if (s_p.in_inflight) {
+        s_p.raw_in_active = true;
+        abort_endpoint(s_p.ep_in);
+        xSemaphoreTake(s_p.in_sem, pdMS_TO_TICKS(500));
+        s_p.raw_in_active = false;
+        if (s_p.in_inflight)
+            return -1;
+    }
+    xSemaphoreTake(s_p.in_sem, 0);
+    s_p.raw_in_active = true;
+    s_p.in->num_bytes = IN_XFER_SIZE;
+    s_p.in_inflight = true;
+    if (usb_host_transfer_submit(s_p.in) != ESP_OK) {
+        s_p.in_inflight = false;
+        s_p.raw_in_active = false;
+        return -1;
+    }
+    bool timed_out = xSemaphoreTake(s_p.in_sem, pdMS_TO_TICKS(timeout_ms)) != pdTRUE;
+    if (timed_out) {
+        abort_endpoint(s_p.ep_in);
+        if (xSemaphoreTake(s_p.in_sem, pdMS_TO_TICKS(500)) != pdTRUE) {
+            s_p.raw_in_active = false;
+            return -1;
+        }
+    }
+    s_p.raw_in_active = false;
+    if (s_p.in->status == USB_TRANSFER_STATUS_COMPLETED) {
+        int actual = s_p.in->actual_num_bytes;
+        if (actual <= 0)
+            return 0;
+        size_t take = (size_t)actual < len ? (size_t)actual : len;
+        memcpy(buf, s_p.in->data_buffer, take);
+        if ((size_t)actual > take) {
+            size_t rem = (size_t)actual - take;
+            if (rem > sizeof(s_p.raw_in_buf))
+                rem = sizeof(s_p.raw_in_buf);
+            memcpy(s_p.raw_in_buf, s_p.in->data_buffer + take, rem);
+            s_p.raw_in_pos = 0;
+            s_p.raw_in_len = rem;
+        }
+        return (int)take;
+    }
+    if (timed_out || s_p.in->status == USB_TRANSFER_STATUS_CANCELED)
+        return 0;
+    return -1;
+}
+
 void usb_printer_job_end(void)
 {
     // the job's last bytes (end of page, end of job) are still in the
@@ -859,9 +950,13 @@ esp_err_t usb_printer_soft_reset(void)
 
 esp_err_t usb_printer_port_status(uint8_t *status)
 {
+    if (s_p.port_status_bad)
+        return ESP_ERR_NOT_SUPPORTED;
     uint8_t req = USB_BM_REQUEST_TYPE_DIR_IN | USB_BM_REQUEST_TYPE_TYPE_CLASS | USB_BM_REQUEST_TYPE_RECIP_INTERFACE;
     size_t got = 0;
     esp_err_t err = ctrl_request(req, PRN_REQ_GET_PORT_STATUS, 0, s_p.intf, 1, status, &got);
+    if (err == ESP_FAIL)
+        s_p.port_status_bad = true;
     return (err == ESP_OK && got != 1) ? ESP_FAIL : err;
 }
 

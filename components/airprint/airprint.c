@@ -72,6 +72,7 @@ typedef struct {
     time_t created, processing, completed;
     int impressions;
     int64_t bytes;
+    int sides;                  // PRINTER_SIDES_*
     volatile int line, height;  // progress of the page being printed (read without the lock)
     volatile bool cancel;
 } job_t;
@@ -745,7 +746,7 @@ static void add_printer_attrs(ipp_out_t *o, const conn_t *c, const filter_t *f)
     if (W("pwg-raster-document-resolution-supported"))
         resolutions(o, "pwg-raster-document-resolution-supported");
     if (W("pwg-raster-document-sheet-back"))
-        ipp_out_str(o, IPP_TAG_KEYWORD, "pwg-raster-document-sheet-back", "normal");
+        ipp_out_str(o, IPP_TAG_KEYWORD, "pwg-raster-document-sheet-back", drv->duplex ? "rotated" : "normal");
     if (W("pwg-raster-document-type-supported"))
         ipp_out_strs(o, IPP_TAG_KEYWORD, "pwg-raster-document-type-supported",
                      drv->color ? (const char *[]){"sgray_8", "srgb_8", NULL} : (const char *[]){"sgray_8", NULL});
@@ -753,8 +754,13 @@ static void add_printer_attrs(ipp_out_t *o, const conn_t *c, const filter_t *f)
         ipp_out_int(o, IPP_TAG_INTEGER, "queued-job-count", s_active ? 1 : 0);
     if (W("sides-default"))
         ipp_out_str(o, IPP_TAG_KEYWORD, "sides-default", "one-sided");
-    if (W("sides-supported"))
-        ipp_out_str(o, IPP_TAG_KEYWORD, "sides-supported", "one-sided");
+    if (W("sides-supported")) {
+        if (drv->duplex)
+            ipp_out_strs(o, IPP_TAG_KEYWORD, "sides-supported",
+                         (const char *[]){"one-sided", "two-sided-long-edge", "two-sided-short-edge", NULL});
+        else
+            ipp_out_str(o, IPP_TAG_KEYWORD, "sides-supported", "one-sided");
+    }
     if (W("uri-authentication-supported"))
         ipp_out_str(o, IPP_TAG_KEYWORD, "uri-authentication-supported", "none");
     if (W("uri-security-supported"))
@@ -884,6 +890,14 @@ static job_t *job_create(const ipp_request_t *req)
     j->created = time(NULL);
     ipp_attr_str(ipp_find(req, IPP_TAG_OPERATION, "job-name"), j->name, sizeof(j->name));
     ipp_attr_str(ipp_find(req, IPP_TAG_OPERATION, "requesting-user-name"), j->user, sizeof(j->user));
+    char sides_str[32];
+    const ipp_attr_t *sa = ipp_find(req, IPP_TAG_JOB, "sides");
+    if (!sa)
+        sa = ipp_find(req, IPP_TAG_OPERATION, "sides");
+    ipp_attr_str(sa, sides_str, sizeof(sides_str));
+    j->sides = !strcmp(sides_str, "two-sided-long-edge")  ? PRINTER_SIDES_TWO_SIDED_LONG_EDGE
+             : !strcmp(sides_str, "two-sided-short-edge") ? PRINTER_SIDES_TWO_SIDED_SHORT_EDGE
+                                                          : PRINTER_SIDES_ONE_SIDED;
     s_active = j;
     return j;
 }
@@ -917,6 +931,16 @@ static int pipe_sync(void *ctx, const char *what)
     return s_cfg->job_sync ? s_cfg->job_sync(s_cfg->ctx, what) : 0;
 }
 
+static int pipe_flush(void *ctx)
+{
+    return s_cfg->job_flush ? s_cfg->job_flush(s_cfg->ctx) : 0;
+}
+
+static int pipe_read(void *ctx, uint8_t *buf, size_t len, int timeout_ms)
+{
+    return s_cfg->job_read ? s_cfg->job_read(s_cfg->ctx, buf, len, timeout_ms) : -1;
+}
+
 static int pipe_page_begin(void *user, const raster_page_t *pg)
 {
     pipe_t *p = user;
@@ -930,9 +954,19 @@ static int pipe_page_begin(void *user, const raster_page_t *pg)
     }
     if (!p->drv_job) {
         int paper = printer_driver_paper_for(d, pg->height, pg->dpi);
-        p->io = (printer_io_t){.write = pipe_write, .sync = pipe_sync, .ctx = p};
+        int sides = d->duplex ? (p->job->sides ? p->job->sides : pg->sides) : PRINTER_SIDES_ONE_SIDED;
+        p->io = (printer_io_t){.write = pipe_write,
+                               .sync = pipe_sync,
+                               .flush = pipe_flush,
+                               .read = pipe_read,
+                               .sides = sides,
+                               .ctx = p};
         p->dpi = pg->dpi;
-        LOGI("job %d: %s %d dpi, %s", p->job->id, d->papers[paper].name, pg->dpi, pg->bytes_pp == 3 ? "color" : "gray");
+        LOGI("job %d: %s %d dpi, %s%s", p->job->id, d->papers[paper].name, pg->dpi,
+             pg->bytes_pp == 3 ? "color" : "gray",
+             sides == PRINTER_SIDES_TWO_SIDED_LONG_EDGE    ? ", duplex-long"
+             : sides == PRINTER_SIDES_TWO_SIDED_SHORT_EDGE ? ", duplex-short"
+                                                           : "");
         p->drv_job = d->job_begin(d, &p->io, pg->dpi, paper);
         if (!p->drv_job) {
             p->err = IPP_INTERNAL_ERROR;
@@ -1405,6 +1439,11 @@ int airprint_status_json(void *ctx, char *buf, size_t n)
     STR(s_cfg->name);
     PUT(",\"model\":");
     STR(s_cfg->make_model);
+    PUT(",\"color\":%s,\"duplex\":%s,\"resolutions\":[", s_cfg->driver->color ? "true" : "false",
+        s_cfg->driver->duplex ? "true" : "false");
+    for (int i = 0; i < s_cfg->driver->nresolutions; i++)
+        PUT("%s%d", i ? "," : "", s_cfg->driver->resolutions[i]);
+    PUT("]");
     pthread_mutex_lock(&s_lock);
     expire_pending();
     int state = printer_state(&st);

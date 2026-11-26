@@ -21,23 +21,27 @@ Turns any USB-only printers into a wireless printer and scanner. An ESP32-S3 boa
 
 | Series | Models | Scan |
 |---|---|---|
-| 🟢 MG2500 | MG2550S | yes |
-| 🟡 MG2400 | MG2410 to MG2490 | yes |
-| 🟡 MG2500 | MG2510 to MG2590 (other than the MG2500S) | yes |
-| 🟡 P200 | P200 | no scanner |
-| 🟡 MG2900 | MG2910 to MG2990 | yes |
-| 🟡 MG3000 | MG3010 to MG3090 | yes |
-| 🟡 E470 | E470 to E478 | yes |
-| 🟡 E460 | E460 to E468 | yes |
-| 🟡 iP2800 | iP2810 to iP2899 | no scanner |
-| 🟡 E3100 | E3170 to E3195 | yes |
-| 🟡 TS3100 | TS3110 to TS3195 | yes |
-| 🟡 MP230 | MP230 to MP237 | yes |
-| 🟡 iP2700 | iP2700 to iP2788 | no scanner |
-| 🟡 MP250, MP270, MP280 | MP250 to MP288 | yes |
-| 🟡 MP490, MP493, MP495 | MP490 to MP499 | yes |
-| 🟡 MX340, MX350 | MX340 to MX358 | yes (glass only) |
-| 🟡 MX360, MX410, MX420 | MX360 to MX428 | yes (glass only) |
+| 🟢 Canon MG2500 | MG2550S | yes |
+| 🟡 Canon MG2400 | MG2410 to MG2490 | yes |
+| 🟡 Canon MG2500 | MG2510 to MG2590 (other than the MG2500S) | yes |
+| 🟡 Canon P200 | P200 | no scanner |
+| 🟡 Canon MG2900 | MG2910 to MG2990 | yes |
+| 🟡 Canon MG3000 | MG3010 to MG3090 | yes |
+| 🟡 Canon E470 | E470 to E478 | yes |
+| 🟡 Canon E460 | E460 to E468 | yes |
+| 🟡 Canon iP2800 | iP2810 to iP2899 | no scanner |
+| 🟡 Canon E3100 | E3170 to E3195 | yes |
+| 🟡 Canon TS3100 | TS3110 to TS3195 | yes |
+| 🟡 Canon MP230 | MP230 to MP237 | yes |
+| 🟡 Canon iP2700 | iP2700 to iP2788 | no scanner |
+| 🟡 Canon MP250, MP270, MP280 | MP250 to MP288 | yes |
+| 🟡 Canon MP490, MP493, MP495 | MP490 to MP499 | yes |
+| 🟡 Canon MX340, MX350 | MX340 to MX358 | yes (glass only) |
+| 🟡 Canon MX360, MX410, MX420 | MX360 to MX428 | yes (glass only) |
+| 🟡 Canon LBP (CAPT) | LBP2900, LBP3000, LBP3050, LBP3300 (auto duplex), LBP6018L, LBP6030, LBP6040 | no scanner |
+| 🟡 HP LaserJet (ZjStream) | 1000, 1005, 1018, 1020, 1022, M1319, P1102/w, P1566, P1606dn, M12a | no scanner |
+| 🟡 HP LaserJet (XQX) | P1005–P1009, P1505, P2014, M1005, M1120, M1132, M1136, M1212nf | no scanner |
+| 🟡 Brother Laser | HL-1110, HL-1210W, HL-2130, HL-2240, HL-L2300D, DCP-1510, DCP-1610W, DCP-L2520D (+ generic `0x04f9`) | no scanner |
 
 - 🟢 Validated on real printer
 - 🟡 Expected to work, not tested on real hardware yet.
@@ -58,7 +62,7 @@ Optionally: a SSD1315 OLED screen and a 3D-printed case, see later in this tutor
 
 ![](./docs/IMG_3538.jpeg)
 
-**Step 2: Settings.** Build once (`pio run`): this creates `.env`. Edit it:
+**Step 2: Settings.** Either configure WiFi via `.env` (build once with `pio run` to generate `.env`), OR leave `WIFI_SSID` empty to use the built-in **WiFi Captive Portal** (`AirPrint-Setup-XXXX` at `http://192.168.4.1/#/wifi`):
    ```
    WIFI_SSID=your-network
    WIFI_PASSWORD=your-password
@@ -66,9 +70,9 @@ Optionally: a SSD1315 OLED screen and a 3D-printed case, see later in this tutor
    HOSTNAME=canon-mg2500
    MODE=debug
    ```
-   `MODE=debug` lets you update the board over WiFi later (see below); `MODE=normal` does without. `.env` is git-ignored, so your WiFi password stays local.
+   `MODE=debug` lets you update the board over WiFi later (see below); `MODE=normal` does without. `.env` is git-ignored, so your WiFi password stays local. You can also reconfigure WiFi later from the web app (`#/wifi`) or by pressing the user button on `GPIO5`.
 
-**Step 3: Flash.** Connect the board's **COM** port to your computer and run `pio run -t upload`. PlatformIO finds the board's serial port; if several are connected, add `--upload-port /dev/cu.usbmodem…`.
+**Step 3: Flash.** Connect the board's **COM** port to your computer and run `pio run -t upload` (or use the browser-based **Web Flasher & Serial Monitor** in `flasher/` — run `python tools/make_factory_bin.py --copy-to-flasher` after `pio run -e esp32s3`, then `cd flasher && npm install && npm run dev`). PlatformIO finds the board's serial port; if several are connected, add `--upload-port /dev/cu.usbmodem…`.
 
 ## Using it
 

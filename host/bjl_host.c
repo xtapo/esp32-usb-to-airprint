@@ -278,35 +278,43 @@ static int cmd_selftest(void)
         bjl_job_free(&job);
     }
 
-    // each Canon driver's test page (what the firmware's button prints) is
-    // the stream of the test page job above for its model, byte for byte
+    // each Canon PIXMA driver's test page is byte-identical to bjl_job_init;
+    // non-BJL laser drivers (HP, Canon LBP, Brother) must emit a non-empty stream
     CHECK(printer_driver_find("canon-mg2500"), "canon-mg2500 driver");
     for (int k = 0; printer_drivers[k]; k++) {
         const printer_driver_t *d = printer_drivers[k];
-        CHECK(d->test_page && d->model, "%s: test page", d->id);
-        for (int i = 0; d->test_page && d->model && i < d->nresolutions; i++) {
+        bool is_pixma = !strncmp(d->id, "canon-", 6) && strncmp(d->id, "canon-lbp", 9) != 0;
+        CHECK(d->test_page != NULL, "%s: test page", d->id);
+        for (int i = 0; d->test_page && i < d->nresolutions; i++) {
             int dpi = d->resolutions[i];
-            uint32_t want = 0, got = 0;
-            bjl_job_t job;
-            testpage_t tp;
-            char info1[64];
-            bjl_job_init(&job, *(const bjl_model_id_t *)d->model, parse_mode(dpi == 600 ? "600" : "300"),
-                         BJL_PAPER_A4, crc_sink, &want);
-            testpage_format_mode(&job, info1, sizeof(info1));
-            testpage_init(&tp, &job, info1, TESTPAGE_DRYRUN_INFO);
-            bjl_emit_start_job(&job);
-            bjl_emit_mode_shift(&job);
-            bjl_page_begin(&job);
-            for (int y = 0; y < job.height; y++)
-                bjl_page_add_line(&job, testpage_render_line(&tp, y));
-            bjl_page_end(&job);
-            bjl_emit_end_job(&job);
-            testpage_free(&tp);
-            bjl_job_free(&job);
-            printer_io_t io = {.write = crc_write, .ctx = &got};
-            CHECK(d->test_page(d, &io, dpi, TESTPAGE_DRYRUN_INFO) == 0, "%s: test page %d dpi", d->id, dpi);
-            CHECK(got == want, "%s: test page %d dpi: crc32 %08x, expected %08x", d->id, dpi, (unsigned)got,
-                  (unsigned)want);
+            if (is_pixma && d->model) {
+                uint32_t want = 0, got = 0;
+                bjl_job_t job;
+                testpage_t tp;
+                char info1[64];
+                bjl_job_init(&job, *(const bjl_model_id_t *)d->model, parse_mode(dpi == 600 ? "600" : "300"),
+                             BJL_PAPER_A4, crc_sink, &want);
+                testpage_format_mode(&job, info1, sizeof(info1));
+                testpage_init(&tp, &job, info1, TESTPAGE_DRYRUN_INFO);
+                bjl_emit_start_job(&job);
+                bjl_emit_mode_shift(&job);
+                bjl_page_begin(&job);
+                for (int y = 0; y < job.height; y++)
+                    bjl_page_add_line(&job, testpage_render_line(&tp, y));
+                bjl_page_end(&job);
+                bjl_emit_end_job(&job);
+                testpage_free(&tp);
+                bjl_job_free(&job);
+                printer_io_t io = {.write = crc_write, .ctx = &got};
+                CHECK(d->test_page(d, &io, dpi, TESTPAGE_DRYRUN_INFO) == 0, "%s: test page %d dpi", d->id, dpi);
+                CHECK(got == want, "%s: test page %d dpi: crc32 %08x, expected %08x", d->id, dpi, (unsigned)got,
+                      (unsigned)want);
+            } else if (!is_pixma) {
+                uint32_t got = 0;
+                printer_io_t io = {.write = crc_write, .ctx = &got};
+                CHECK(d->test_page(d, &io, dpi, TESTPAGE_DRYRUN_INFO) == 0, "%s: test page %d dpi", d->id, dpi);
+                CHECK(got != 0, "%s: test page %d dpi empty", d->id, dpi);
+            }
         }
     }
 
@@ -327,6 +335,13 @@ static int cmd_selftest(void)
             {0x03f0, 0x1234, "MFG:HP;MDL:iP2700 series;", NULL},              // another maker
             {0x04a9, 0x1234, "MFG:Canon;MDL:iP2700 series XL;", NULL},
             {0x04a9, 0x1234, "", NULL},
+            {0x03f0, 0x002a, "", "hp-p1102"},
+            {0x03f0, 0x3d17, "", "hp-p1005"},
+            {0x04a9, 0x2676, "", "canon-lbp2900"},
+            {0x04a9, 0x267e, "MFG:Canon;MDL:LBP3300;", "canon-lbp3300"},
+            {0x04a9, 0x2794, "", "canon-lbp6030"},
+            {0x04f9, 0x0054, "", "brother-hl1110"},
+            {0x04f9, 0x9999, "MFG:Brother;MDL:HL-9999;", "brother-laser"},
         };
         for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
             const printer_driver_t *d = printer_driver_match(cases[i].vid, cases[i].pid, cases[i].device_id);

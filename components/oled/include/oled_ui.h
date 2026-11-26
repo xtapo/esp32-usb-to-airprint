@@ -31,6 +31,8 @@ extern "C" {
 typedef struct {
     const char *name;           // host name
     bool wifi_configured;       // false: no WiFi in .env, the printer works locally only
+    bool ap_mode;               // true: SoftAP setup portal active
+    char ap_ssid[24];           // setup AP SSID when ap_mode is true
     char ip[16];                // "" while not connected
     int rssi;                   // dBm, 0 = unknown
     bool started;               // the print server runs (else only print.status.connected counts)

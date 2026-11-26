@@ -21,6 +21,9 @@ export interface Job {
 export interface PrinterState {
   name: string;
   model: string;
+  color?: boolean;
+  duplex?: boolean;
+  resolutions?: number[];
   connected: boolean;
   state: 'idle' | 'processing' | 'stopped';
   message: string;

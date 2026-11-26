@@ -131,12 +131,11 @@ static void on_double_press(void)
     }
 }
 
-// The second button (GPIO5): free for whatever you want it to do. Called once
-// per press (debounced), on the button task: start long work in a task of its
-// own. The press has already turned the screen on.
+// The second button (GPIO5): starts the WiFi setup SoftAP portal on demand.
 static void on_user_button(void)
 {
-    ESP_LOGI(TAG, "user button (GPIO%d) pressed: no action assigned", CONFIG_USER_BUTTON_GPIO);
+    ESP_LOGI(TAG, "user button (GPIO%d) pressed: enabling WiFi setup portal", CONFIG_USER_BUTTON_GPIO);
+    wifi_start_portal();
 }
 
 static void input_pullup(int pin)
@@ -267,9 +266,10 @@ void app_main(void)
     ESP_LOGI(TAG, "ready: press BOOT (or GPIO%d) to scan, twice for a test page", CONFIG_PRINT_BUTTON2_GPIO);
 
     xTaskCreate(ota_confirm_task, "ota_confirm", 3072, NULL, 2, NULL);
-    // AirPrint; the printer keeps working locally if WiFi isn't configured
+    // AirPrint + captive portal; the printer keeps working even in AP setup mode
     if (wifi_start(HOSTNAME) == ESP_OK) {
-        if (airprint_esp_start(HOSTNAME, on_airprint_job) != ESP_OK)
+        const char *host = wifi_effective_hostname();
+        if (airprint_esp_start(host, on_airprint_job) != ESP_OK)
             ESP_LOGE(TAG, "AirPrint failed to start");
         if (debug)
             s_debug_server_up = debug_server_start(device_busy) == ESP_OK;
