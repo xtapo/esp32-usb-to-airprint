@@ -90,6 +90,11 @@ typedef struct printer_driver {
     // fields of the last status reply the USB layer reassembled) into IPP
     // terms: reasons, message, ink levels.
     void (*status)(const char *state, const char *detail, const char *data, airprint_status_t *st);
+
+    // optional: actively poll the printer for status when idle (used by
+    // request/reply protocols like Canon CAPT that do not push status on bulk IN).
+    // Returns 0 on success, < 0 on I/O error.
+    int (*poll_status)(const struct printer_driver *d, const printer_io_t *io);
 } printer_driver_t;
 
 // The driver with this id (printers.c), NULL if none.

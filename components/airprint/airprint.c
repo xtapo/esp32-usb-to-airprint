@@ -915,6 +915,7 @@ typedef struct {
     void *drv_job;              // the driver's job, once the first page started
     int dpi;
     int err;                    // first failure, an IPP status
+    bool drv_err;               // driver page callback failed
 } pipe_t;
 
 static int pipe_write(void *ctx, const uint8_t *data, size_t len)
@@ -980,7 +981,11 @@ static int pipe_page_begin(void *user, const raster_page_t *pg)
     }
     p->job->line = 0;
     p->job->height = pg->height;
-    return d->page_begin(p->drv_job, pg->width, pg->height, pg->bytes_pp) ? 4 : 0;
+    if (d->page_begin(p->drv_job, pg->width, pg->height, pg->bytes_pp)) {
+        p->drv_err = true;
+        return 4;
+    }
+    return 0;
 }
 
 static int pipe_line(void *user, int y, const uint8_t *px)
@@ -994,6 +999,8 @@ static int pipe_line(void *user, int y, const uint8_t *px)
 #endif
     int64_t t0 = now_us();
     int r = s_cfg->driver->page_line(p->drv_job, y, px) ? 4 : 0;
+    if (r)
+        p->drv_err = true;
     p->render_us += now_us() - t0;
     p->job->line = y + 1;
     return r;
@@ -1002,11 +1009,14 @@ static int pipe_line(void *user, int y, const uint8_t *px)
 static int pipe_page_end(void *user, const raster_page_t *pg)
 {
     pipe_t *p = user;
-    if (s_cfg->driver->page_end(p->drv_job))
+    if (s_cfg->driver->page_end(p->drv_job)) {
+        p->drv_err = true;
         return 4;
+    }
     pthread_mutex_lock(&s_lock);
     p->job->impressions++;
     pthread_mutex_unlock(&s_lock);
+    events_poke();
     LOGI("job %d: page %d done (%u bytes so far)", p->job->id, pg->page, (unsigned)p->bytes_out);
     return 0;
 }
@@ -1019,12 +1029,14 @@ static int print_document(conn_t *c, job_t *j)
         j->reason = "printer-stopped";
         job_finish(j, JOB_ABORTED);
         pthread_mutex_unlock(&s_lock);
+        events_poke();
         return IPP_BUSY;
     }
     pthread_mutex_lock(&s_lock);
     j->state = JOB_PROCESSING;
     j->processing = time(NULL);
     pthread_mutex_unlock(&s_lock);
+    events_poke();
     if (s_cfg->job_state)
         s_cfg->job_state(s_cfg->ctx, true);
     LOGI("job %d: printing \"%s\" (%s) from %s", j->id, j->name, j->format, j->user);
@@ -1062,7 +1074,7 @@ static int print_document(conn_t *c, job_t *j)
          (p->render_us - p->out_us) / 1e6, (t_total - rd.wait_us - p->render_us) / 1e6);
 
     bool canceled = j->cancel;
-    bool ok = r > 0 && !canceled;
+    bool ok = r > 0 && !canceled && !p->err && !p->drv_err;
     bool link_ok = true;
     if (p->drv_job) {
         // the driver finishes the job whatever happened (cancel, bad data,
@@ -1076,6 +1088,20 @@ static int print_document(conn_t *c, job_t *j)
         s_cfg->job_close(s_cfg->ctx, link_ok);
     if (s_cfg->job_state)
         s_cfg->job_state(s_cfg->ctx, false);
+
+    const char *err_reason = NULL;
+    if (!canceled && !ok && r > 0 && !p->err) {
+        airprint_status_t st;
+        get_status(&st);
+        for (int i = 0; i < st.nreasons; i++) {
+            const char *rn = st.reasons[i];
+            size_t rl = strlen(rn);
+            if (rl >= 6 && strcmp(rn + rl - 6, "-error") == 0) {
+                err_reason = rn;
+                break;
+            }
+        }
+    }
 
     int status = IPP_OK;
     pthread_mutex_lock(&s_lock);
@@ -1100,7 +1126,7 @@ static int print_document(conn_t *c, job_t *j)
             j->reason = "document-unprintable-error";
             status = p->err;
         } else {
-            j->reason = "printer-stopped";
+            j->reason = err_reason ? err_reason : "printer-stopped";
             status = IPP_DEVICE_ERROR;
         }
         job_finish(j, JOB_ABORTED);
@@ -1109,6 +1135,7 @@ static int print_document(conn_t *c, job_t *j)
          j->state == JOB_COMPLETED ? "completed" : j->state == JOB_CANCELED ? "canceled" : "aborted", j->impressions,
          (long long)j->bytes, r < 0 ? ": " : "", r < 0 ? raster_strerror(r) : "");
     pthread_mutex_unlock(&s_lock);
+    events_poke();
     free(p);
     return status;
 }

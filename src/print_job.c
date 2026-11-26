@@ -47,7 +47,7 @@ bool print_job_set_printer(const usb_printer_info_t *info)
     const printer_driver_t *d = printer_driver_match(info->vid, info->pid, info->device_id);
     s_attached = d;
     const printer_driver_t *active = print_job_driver();
-    bool ivec = active && active->status != NULL;
+    bool ivec = active && active->status != NULL && active->poll_status == NULL;
     usb_printer_set_ivec_polling(ivec);
     if (d)
         ESP_LOGI(TAG, "printer %04x:%04x: driver %s (%s)", info->vid, info->pid, d->id, d->make_model);

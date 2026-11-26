@@ -42,6 +42,8 @@ static int s_device_id_cur;
 static void (*s_on_job_state)(bool);
 static esp_timer_handle_t s_cancel_timer;
 static volatile bool s_job_running;
+static volatile bool s_status_polling;
+static int64_t s_last_poll_us;
 
 // The shared buffer takes all the PSRAM but this much, left for everything
 // else (encoder strips, raster buffers, ...)
@@ -69,26 +71,51 @@ static void add_reason(airprint_status_t *st, const char *reason)
         st->reasons[st->nreasons++] = reason;
 }
 
+static int job_write(void *ctx, const uint8_t *data, size_t len);
+static int job_flush(void *ctx);
+static int job_read(void *ctx, uint8_t *buf, size_t len, int timeout_ms);
+
 static void get_status(void *ctx, airprint_status_t *st)
 {
     st->connected = usb_printer_connected();
-    if (!st->connected)
+    if (!st->connected) {
+        s_last_poll_us = 0;
         return;
-    st->busy = usb_printer_job_active() && !s_job_running;     // local test page or scan
+    }
+    st->busy = usb_printer_job_active() && !s_job_running && !s_status_polling; // local test page or scan
     bool scanning = usb_scanner_active();
     if (scanning)
         snprintf(st->message, sizeof(st->message), "Scanning");
 
+    const printer_driver_t *drv = print_job_driver();
+    if (!s_job_running && !scanning && !usb_printer_job_active() && drv->poll_status) {
+        int64_t now = esp_timer_get_time();
+        if (!s_last_poll_us || now - s_last_poll_us >= 2000000LL) {
+            s_last_poll_us = now;
+            if (usb_printer_job_begin() == ESP_OK) {
+                s_status_polling = true;
+                printer_io_t pio = {
+                    .write = job_write,
+                    .flush = job_flush,
+                    .read = job_read,
+                    .ctx = NULL,
+                };
+                drv->poll_status(drv, &pio);
+                s_status_polling = false;
+                usb_printer_job_end();
+            }
+        }
+    }
+
     // the printer's own status (reasons, message, ink) as its driver reads it
     usb_printer_status_t cs;
     bool have = usb_printer_get_status(&cs);
-    const printer_driver_t *drv = print_job_driver();
     if (drv->status)
         drv->status(have ? cs.state : NULL, have ? cs.detail : NULL, have ? cs.data : NULL, st);
     const char *d = have ? cs.detail : "";
-    // USB printer class port status: paper empty
+    // USB printer class port status: paper empty (skip when CAPT poll handles paper status)
     uint8_t port = 0;
-    if (!s_job_running && !scanning && usb_printer_port_status(&port) == ESP_OK && (port & 0x20) &&
+    if (!drv->poll_status && !s_job_running && !scanning && usb_printer_port_status(&port) == ESP_OK && (port & 0x20) &&
         !strstr(d, "MediaEmpty")) {
         add_reason(st, "media-empty-error");
         snprintf(st->message, sizeof(st->message), "Out of paper");

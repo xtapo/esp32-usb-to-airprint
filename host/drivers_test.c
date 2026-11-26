@@ -485,6 +485,10 @@ typedef struct {
     uint16_t pages_started, pages_rx, pages_fired;
     bool sim_fifo;
     bool fired_before_c0a4;
+    uint16_t status0, status1, status2, eng_status;
+    bool custom_status2;
+    uint8_t r26;
+    bool block_output;
     int cmds_seen[8]; // 0:A1A1, 1:A2A0, 2:D0A9, 3:C0A0, 4:C0A4, 5:E0A7, 6:E0A9
 } mock_capt_t;
 
@@ -543,13 +547,24 @@ static int mock_capt_write(void *ctx, const uint8_t *data, size_t len)
             uint16_t pdec = m->pages_started ? m->pages_started : 1;
             if (m->sim_fifo && m->pages_fired >= m->pages_started && m->fifo_free == 0)
                 m->fifo_free = 15;
+            uint16_t pout = m->block_output ? 0 : m->pages_fired;
+            uint16_t s2 = m->custom_status2 ? m->status2 : (m->status2 ? m->status2 : 0x0040u);
+            m->reply[4 + 0] = (uint8_t)(m->status0 & 0xff);
+            m->reply[4 + 1] = (uint8_t)(m->status0 >> 8);
             m->reply[4 + 4] = m->sim_fifo ? m->fifo_free : 0x0F;
+            m->reply[4 + 8] = (uint8_t)(m->status1 & 0xff);
+            m->reply[4 + 9] = (uint8_t)(m->status1 >> 8);
+            m->reply[4 + 10] = (uint8_t)(s2 & 0xff);
+            m->reply[4 + 11] = (uint8_t)(s2 >> 8);
+            m->reply[4 + 12] = (uint8_t)(m->eng_status & 0xff);
+            m->reply[4 + 13] = (uint8_t)(m->eng_status >> 8);
             m->reply[4 + 14] = (uint8_t)(pdec & 0xff);
             m->reply[4 + 15] = (uint8_t)(pdec >> 8);
-            m->reply[4 + 18] = (uint8_t)(m->pages_fired & 0xff);
-            m->reply[4 + 19] = (uint8_t)(m->pages_fired >> 8);
-            m->reply[4 + 20] = (uint8_t)(m->pages_fired & 0xff);
-            m->reply[4 + 21] = (uint8_t)(m->pages_fired >> 8);
+            m->reply[4 + 18] = (uint8_t)(pout & 0xff);
+            m->reply[4 + 19] = (uint8_t)(pout >> 8);
+            m->reply[4 + 20] = (uint8_t)(pout & 0xff);
+            m->reply[4 + 21] = (uint8_t)(pout >> 8);
+            m->reply[4 + 26] = m->r26;
             m->reply[4 + 34] = (uint8_t)(m->pages_rx & 0xff);
             m->reply[4 + 35] = (uint8_t)(m->pages_rx >> 8);
             m->rlen = 88; m->rpos = 0;
@@ -843,6 +858,97 @@ int main(void)
                   strstr((const char *)out.buf + 128, "@PJL SET BINDING = LONGEDGE") != NULL,
               "brother-hll2300d PJL duplex headers missing");
         free(out.buf);
+    }
+
+    // 9. Canon LBP3300 CAPT status decoding & physical output failure tests
+    {
+        const printer_driver_t *d = printer_driver_find("canon-lbp3300");
+        CHECK(d != NULL && d->poll_status != NULL && d->status != NULL, "canon-lbp3300 status hooks");
+
+        typedef struct {
+            uint16_t s0, s1, s2, eng;
+            uint8_t r26;
+            const char *expect_reason;
+            const char *expect_msg;
+        } status_case_t;
+        static const status_case_t cases[] = {
+            {0x0000, 0x0000, 0x0040, 0x0000, 0, NULL, ""},
+            {0x8e13, 0x0000, 0x0040, 0x0080, 0, NULL, ""},
+            {0x0000, 0x0000, 0x0000, 0x0000, 0, "media-empty-error", "Out of paper"},
+            {0x0000, 0x0000, 0x0040, 0x0100, 0, "media-jam-error", "Paper jam"},
+            {0x0000, 0x0000, 0x0040, 0x4000, 0, "cover-open-error", "Cover open"},
+            {0x0000, 0x0000, 0x0040, 0x4000, 1, "marker-supply-empty-error", "No toner cartridge"},
+            {0x0000, 0x0000, 0x0040, 0x0002, 0, "other-error", "Printer service error"},
+        };
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            mock_capt_t mc = {
+                .status0 = cases[i].s0,
+                .status1 = cases[i].s1,
+                .custom_status2 = true,
+                .status2 = cases[i].s2,
+                .eng_status = cases[i].eng,
+                .r26 = cases[i].r26,
+            };
+            printer_io_t io = {.write = mock_capt_write, .flush = mock_capt_flush, .read = mock_capt_read, .ctx = &mc};
+            CHECK(d->poll_status(d, &io) == 0, "lbp3300 poll_status case %zu", i);
+            airprint_status_t st = {.connected = true};
+            d->status(NULL, NULL, NULL, &st);
+            if (!cases[i].expect_reason) {
+                CHECK(st.nreasons == 0, "lbp3300 ready expected 0 reasons, got %d", st.nreasons);
+            } else {
+                CHECK(st.nreasons >= 1 && strcmp(st.reasons[0], cases[i].expect_reason) == 0,
+                      "lbp3300 status case %zu expected %s, got %s", i, cases[i].expect_reason,
+                      st.nreasons ? st.reasons[0] : "(none)");
+                CHECK(strcmp(st.message, cases[i].expect_msg) == 0, "lbp3300 status case %zu msg '%s'", i,
+                      st.message);
+            }
+            free(mc.tx.buf);
+        }
+
+        // Live idle snapshot (s0=0x8e13, s2=0x0040, eng=0x0080) must print without false abort
+        {
+            mock_capt_t ok_mc = {.status0 = 0x8e13, .custom_status2 = true, .status2 = 0x0040, .eng_status = 0x0080};
+            printer_io_t ok_io = {.write = mock_capt_write,
+                                  .flush = mock_capt_flush,
+                                  .read = mock_capt_read,
+                                  .ctx = &ok_mc};
+            void *job = d->job_begin(d, &ok_io, 600, 0);
+            CHECK(job != NULL, "lbp3300 idle-bits job_begin");
+            CHECK(d->page_begin(job, 64, 16, 1) == 0, "lbp3300 idle-bits page_begin");
+            uint8_t px[64];
+            memset(px, 0x40, sizeof(px));
+            for (int y = 0; y < 16; y++)
+                CHECK(d->page_line(job, y, px) == 0, "lbp3300 idle-bits page_line");
+            CHECK(d->page_end(job) == 0, "lbp3300 idle-bits page_end");
+            CHECK(d->job_end(job) == 0, "lbp3300 idle-bits job_end");
+            free(ok_mc.tx.buf);
+        }
+
+        // Physical output failure: page never exits and printer stops with out-of-paper
+        mock_capt_t mc = {
+            .status1 = 0x4000,
+            .custom_status2 = true,
+            .status2 = 0x0000,
+            .block_output = true,
+        };
+        printer_io_t io = {.write = mock_capt_write, .flush = mock_capt_flush, .read = mock_capt_read, .ctx = &mc};
+        void *job = d->job_begin(d, &io, 600, 0);
+        CHECK(job != NULL, "lbp3300 fail job_begin");
+        CHECK(d->page_begin(job, 64, 16, 1) == 0, "lbp3300 fail page_begin");
+        uint8_t px[64];
+        memset(px, 0x40, sizeof(px));
+        for (int y = 0; y < 16; y++)
+            CHECK(d->page_line(job, y, px) == 0, "lbp3300 fail page_line");
+        CHECK(d->page_end(job) != 0, "lbp3300 expected page_end failure when page_out == 0");
+        CHECK(d->job_end(job) != 0, "lbp3300 expected job_end failure after aborted page");
+        airprint_status_t st = {.connected = true};
+        d->status(NULL, NULL, NULL, &st);
+        bool has_empty = false;
+        for (int i = 0; i < st.nreasons; i++)
+            if (strcmp(st.reasons[i], "media-empty-error") == 0)
+                has_empty = true;
+        CHECK(has_empty, "lbp3300 fail expected media-empty-error in status");
+        free(mc.tx.buf);
     }
 
     printf("drivers_test: %s (%d failures, %d drivers registered)\n", failures ? "FAILED" : "OK", failures, drv_count);

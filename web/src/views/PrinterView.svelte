@@ -26,10 +26,12 @@
 
   const REASONS: Record<string, string> = {
     'marker-supply-low-warning': 'Ink is running low',
-    'marker-supply-empty-error': 'An ink cartridge is empty or missing',
-    'media-empty-error': 'Out of paper: load paper in the rear tray',
+    'marker-supply-empty-error': 'Cartridge is empty or missing',
+    'media-empty-error': 'Out of paper',
     'media-jam-error': 'Paper jam',
     'cover-open-error': 'The cover is open',
+    'other-error': 'Printer error',
+    'printer-stopped': 'Printer stopped',
     'offline-report': 'The printer is not connected',
   };
 
@@ -176,7 +178,14 @@
             <div class="grow">
               <div class="ellipsis">{j.name}</div>
               <div class="muted small">
-                {[`${j.pages} page${j.pages === 1 ? '' : 's'}`, ago(j.time), j.user].filter(Boolean).join(' · ')}
+                {[
+                  `${j.pages} page${j.pages === 1 ? '' : 's'}`,
+                  j.state === 'aborted' && j.reason && j.reason !== 'aborted-by-system' ? reasonText(j.reason) : '',
+                  ago(j.time),
+                  j.user,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
               </div>
             </div>
             <span class="pill {tone}">{label}</span>

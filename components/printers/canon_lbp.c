@@ -88,6 +88,7 @@ typedef struct {
     uint16_t status0;
     uint16_t status1;
     uint16_t status2;
+    uint16_t eng_status;
     uint32_t bands_sent;
 
     uint8_t *density;
@@ -98,6 +99,7 @@ typedef struct {
     int total_y;            // lines received on current page
     bool in_page;
     bool err;
+    bool io_err;
     uint8_t model_id[2];
     bool has_model_id;
     uint8_t fifo_free;
@@ -105,6 +107,20 @@ typedef struct {
     bool page_fired;
     uint32_t page_bytes_sent;
 } capt_job_t;
+
+typedef struct {
+    volatile bool valid;
+    capt_variant_t variant;
+    uint16_t status0;
+    uint16_t status1;
+    uint16_t status2;
+    uint16_t eng_status;
+    uint8_t r26;
+    uint16_t page_out;
+    uint16_t page_completed;
+} capt_live_status_t;
+
+static capt_live_status_t s_capt_status;
 
 static void capt_log_hex(const char *label, const uint8_t *buf, size_t len)
 {
@@ -140,6 +156,7 @@ static int capt_write_all(capt_job_t *j, const void *data, size_t len)
         return -1;
     if (j->io.write(j->io.ctx, (const uint8_t *)data, len) < 0) {
         j->err = true;
+        j->io_err = true;
         return -1;
     }
     return 0;
@@ -200,12 +217,14 @@ static int capt_sendrecv(capt_job_t *j, uint16_t cmd, const void *payload, size_
     if (j->io.flush && j->io.flush(j->io.ctx) < 0) {
         CAPT_LOGW("cmd %04x: flush failed", cmd);
         j->err = true;
+        j->io_err = true;
         return -1;
     }
     uint8_t head[6];
     if (capt_read_exact(j, head, 6, 3000) < 0) {
         CAPT_LOGW("cmd %04x: header read failed/timeout", cmd);
         j->err = true;
+        j->io_err = true;
         return -1;
     }
     size_t sz = (size_t)(head[2] | (head[3] << 8));
@@ -229,6 +248,7 @@ static int capt_sendrecv(capt_job_t *j, uint16_t cmd, const void *payload, size_
         if (r < 0) {
             CAPT_LOGW("cmd %04x: body read error at %zu/%zu", cmd, total, sz);
             j->err = true;
+            j->io_err = true;
             return -1;
         }
         if (r == 0) {
@@ -238,6 +258,7 @@ static int capt_sendrecv(capt_job_t *j, uint16_t cmd, const void *payload, size_
                 CAPT_LOGW("cmd %04x: body read timeout at %zu/%zu (bcd=%s%zu)", cmd, total, sz, bcd_valid ? "" : "no:",
                           bcd_sz);
                 j->err = true;
+                j->io_err = true;
                 return -1;
             }
             continue;
@@ -267,6 +288,7 @@ static int capt_send_flush(capt_job_t *j, uint16_t cmd, const void *payload, siz
     if (j->io.flush && j->io.flush(j->io.ctx) < 0) {
         CAPT_LOGW("cmd %04x: flush failed", cmd);
         j->err = true;
+        j->io_err = true;
         return -1;
     }
     return 0;
@@ -275,6 +297,34 @@ static int capt_send_flush(capt_job_t *j, uint16_t cmd, const void *payload, siz
 static capt_variant_t variant_of(const printer_driver_t *d)
 {
     return ((const capt_model_t *)d->model)->variant;
+}
+
+static void capt_record_xstatus(capt_variant_t v, const uint8_t *r, size_t rn)
+{
+    if (rn < 22)
+        return;
+    uint16_t s0 = (uint16_t)(r[0] | (r[1] << 8));
+    uint16_t s1 = (uint16_t)(r[8] | (r[9] << 8));
+    uint16_t s2 = (uint16_t)(r[10] | (r[11] << 8));
+    uint16_t eng = (uint16_t)(r[12] | (r[13] << 8));
+    uint8_t r26 = rn >= 27 ? r[26] : 0;
+    uint16_t pout = (uint16_t)(r[18] | (r[19] << 8));
+    uint16_t pcomp = (uint16_t)(r[20] | (r[21] << 8));
+    if (!s_capt_status.valid || s_capt_status.variant != v || s_capt_status.status0 != s0 ||
+        s_capt_status.status1 != s1 || s_capt_status.status2 != s2 || s_capt_status.eng_status != eng ||
+        s_capt_status.r26 != r26) {
+        CAPT_LOGI("status: s0=%04x s1=%04x s2=%04x eng=%04x r26=%02x out=%u comp=%u", s0, s1, s2, eng, r26, pout,
+                  pcomp);
+    }
+    s_capt_status.variant = v;
+    s_capt_status.status0 = s0;
+    s_capt_status.status1 = s1;
+    s_capt_status.status2 = s2;
+    s_capt_status.eng_status = eng;
+    s_capt_status.r26 = r26;
+    s_capt_status.page_out = pout;
+    s_capt_status.page_completed = pcomp;
+    s_capt_status.valid = true;
 }
 
 static int capt_get_status(capt_job_t *j)
@@ -316,9 +366,11 @@ static int capt_get_xstatus(capt_job_t *j, bool force)
         j->status0 = (uint16_t)(r[0] | (r[1] << 8));
         j->status1 = (uint16_t)(r[8] | (r[9] << 8));
         j->status2 = (uint16_t)(r[10] | (r[11] << 8));
+        j->eng_status = (uint16_t)(r[12] | (r[13] << 8));
         j->page_decoding = (uint16_t)(r[14] | (r[15] << 8));
         j->page_out = (uint16_t)(r[18] | (r[19] << 8));
         j->page_completed = (uint16_t)(r[20] | (r[21] << 8));
+        capt_record_xstatus(v, r, rn);
     }
     if (rn >= 36)
         j->page_received = (uint16_t)(r[34] | (r[35] << 8));
@@ -328,6 +380,176 @@ static int capt_get_xstatus(capt_job_t *j, bool force)
 static int capt_poll_status(capt_job_t *j)
 {
     return capt_get_xstatus(j, false);
+}
+
+static bool capt_has_hard_error(const capt_job_t *j)
+{
+    if (j->eng_status & (0x0100u | 0x4000u | 0x0002u))
+        return true;    // jam, cover open / no cartridge, service call
+    bool nopaper_bit = variant_of(j->drv) == CAPT_LBP3300
+                           ? ((j->status1 & 0x4000u) != 0)
+                           : (((j->status0 & 0x0002u) || (j->status1 & 0x4000u)) != 0);
+    if (nopaper_bit && !(j->status1 & (0x0004u | 0x0080u)))
+        return true;    // out of paper / print rejected and engine stopped
+    return false;
+}
+
+static void capt_add_reason(airprint_status_t *st, const char *reason)
+{
+    for (int i = 0; i < st->nreasons; i++)
+        if (strcmp(st->reasons[i], reason) == 0)
+            return;
+    if (st->nreasons < (int)(sizeof(st->reasons) / sizeof(st->reasons[0])))
+        st->reasons[st->nreasons++] = reason;
+}
+
+static int capt_idle_poll_status(const printer_driver_t *d, const printer_io_t *io)
+{
+    if (!d || !io || !io->write || !io->read)
+        return -1;
+    static const uint8_t cmd[4] = {
+        (uint8_t)(CAPT_CHKXSTATUS & 0xff), (uint8_t)(CAPT_CHKXSTATUS >> 8), 0x04, 0x00,
+    };
+    if (io->write(io->ctx, cmd, sizeof(cmd)) < 0) {
+        CAPT_LOGW("idle poll: write failed");
+        return -1;
+    }
+    if (io->flush && io->flush(io->ctx) < 0) {
+        CAPT_LOGW("idle poll: flush failed");
+        return -1;
+    }
+
+    uint8_t head[6];
+    size_t got = 0;
+    int retries = 0;
+    while (got < sizeof(head)) {
+        int r = io->read(io->ctx, head + got, sizeof(head) - got, 500);
+        if (r < 0) {
+            CAPT_LOGW("idle poll: header read err (%d) at %zu", r, got);
+            return -1;
+        }
+        if (r == 0) {
+            if (++retries > 1) {
+                CAPT_LOGW("idle poll: header timeout at %zu", got);
+                return -1;
+            }
+            continue;
+        }
+        got += (size_t)r;
+    }
+
+    size_t sz = (size_t)(head[2] | (head[3] << 8));
+    size_t bcd_sz = 0;
+    bool bcd_valid = capt_bcd_len(head[2], head[3], &bcd_sz) && bcd_sz >= 6 && bcd_sz < sz;
+    if (sz < 6)
+        sz = 6;
+
+    uint8_t rbuf[96];
+    memset(rbuf, 0, sizeof(rbuf));
+    memcpy(rbuf, head + 4, 2);
+
+    size_t total = 6;
+    int timeouts = 0;
+    while (total < sz && (!bcd_valid || total != bcd_sz)) {
+        uint8_t chunk[96];
+        size_t want = sz - total;
+        if (want > sizeof(chunk))
+            want = sizeof(chunk);
+        int r = io->read(io->ctx, chunk, want, 500);
+        if (r < 0) {
+            CAPT_LOGW("idle poll: body read err (%d) at %zu/%zu [%02x %02x %02x %02x %02x %02x]", r, total, sz,
+                      head[0], head[1], head[2], head[3], head[4], head[5]);
+            return -1;
+        }
+        if (r == 0) {
+            if (bcd_valid && total == bcd_sz)
+                break;
+            if (++timeouts > 1) {
+                CAPT_LOGW("idle poll: body timeout at %zu/%zu [%02x %02x %02x %02x %02x %02x]", total, sz, head[0],
+                          head[1], head[2], head[3], head[4], head[5]);
+                return -1;
+            }
+            continue;
+        }
+        timeouts = 0;
+        if (total - 4 < sizeof(rbuf)) {
+            size_t off = total - 4;
+            size_t avail = sizeof(rbuf) - off;
+            size_t cp = (size_t)r < avail ? (size_t)r : avail;
+            memcpy(rbuf + off, chunk, cp);
+        }
+        total += (size_t)r;
+    }
+    if (total - 4 < 22) {
+        CAPT_LOGW("idle poll: short reply %zu B [%02x %02x %02x %02x %02x %02x]", total, head[0], head[1], head[2],
+                  head[3], head[4], head[5]);
+        return -1;
+    }
+    capt_record_xstatus(variant_of(d), rbuf, total - 4);
+    return 0;
+}
+
+static void capt_status(const char *state, const char *detail, const char *data, airprint_status_t *st)
+{
+    (void)state;
+    (void)detail;
+    (void)data;
+    if (!s_capt_status.valid)
+        return;
+
+    uint16_t s0 = s_capt_status.status0;
+    uint16_t s1 = s_capt_status.status1;
+    uint16_t s2 = s_capt_status.status2;
+    uint16_t eng = s_capt_status.eng_status;
+    uint8_t r26 = s_capt_status.r26;
+    capt_variant_t v = s_capt_status.variant;
+
+    if (eng & 0x0100u) {
+        capt_add_reason(st, "media-jam-error");
+        if (!st->message[0])
+            snprintf(st->message, sizeof(st->message), "Paper jam");
+    }
+    if (eng & 0x4000u) {
+        if (r26 != 0) {
+            capt_add_reason(st, "marker-supply-empty-error");
+            if (!st->message[0])
+                snprintf(st->message, sizeof(st->message), "No toner cartridge");
+        } else {
+            capt_add_reason(st, "cover-open-error");
+            if (!st->message[0])
+                snprintf(st->message, sizeof(st->message), "Cover open");
+        }
+    }
+    if (eng & 0x0002u) {
+        capt_add_reason(st, "other-error");
+        if (!st->message[0])
+            snprintf(st->message, sizeof(st->message), "Printer service error");
+    }
+
+    bool no_paper_tray = (v == CAPT_LBP3300) && ((s2 & 0x00C0u) == 0);
+    bool print_rejected = (s1 & 0x4000u) != 0;
+    bool basic_nopaper = (v != CAPT_LBP3300) && ((s0 & 0x0002u) != 0) &&
+                         !(eng & (0x0100u | 0x4000u | 0x0002u)) && !(s1 & 0x0084u);
+    if (no_paper_tray || print_rejected || basic_nopaper) {
+        capt_add_reason(st, "media-empty-error");
+        if (!st->message[0])
+            snprintf(st->message, sizeof(st->message), "Out of paper");
+    }
+
+    if (st->nreasons == 0 && (s1 & 0x1F00u) != 0) {
+        capt_add_reason(st, "other-error");
+        if (!st->message[0])
+            snprintf(st->message, sizeof(st->message), "Printer error");
+    }
+
+    if (st->nreasons == 0 && !st->message[0]) {
+        if (s1 & 0x0004u)
+            snprintf(st->message, sizeof(st->message), "Printing");
+        else if (eng & 0x0004u)
+            snprintf(st->message, sizeof(st->message), "Cleaning");
+        else if ((eng & 0x1000u) || (s0 & 0x0004u))
+            snprintf(st->message, sizeof(st->message), "Warming up");
+    }
 }
 
 static int capt_wait_ready(capt_job_t *j)
@@ -568,8 +790,9 @@ static int flush_band(capt_job_t *j, bool last_band)
                         break;
                     if (!j->page_fired && j->page_decoding >= j->hw_page)
                         capt_fire_page(j, j->hw_page);
-                    if (((j->status0 & 0x0002u) || (j->status1 & 0x4000u)) && !(j->status1 & (0x0004u | 0x0080u))) {
-                        CAPT_LOGW("fifo wait error pg=%u s0=%04x s1=%04x", j->hw_page, j->status0, j->status1);
+                    if (capt_has_hard_error(j)) {
+                        CAPT_LOGW("fifo wait error pg=%u s0=%04x s1=%04x eng=%04x", j->hw_page, j->status0, j->status1,
+                                  j->eng_status);
                         j->err = true;
                         break;
                     }
@@ -841,23 +1064,31 @@ static int page_end(void *job)
                     break;
                 if (j->page_received >= j->hw_page && j->page_decoding >= j->hw_page)
                     break;
-                if (((j->status0 & 0x0002u) || (j->status1 & 0x4000u)) && !(j->status1 & (0x0004u | 0x0080u)))
+                if (capt_has_hard_error(j)) {
+                    j->err = true;
                     break;
+                }
                 capt_sleep_ms(100);
             }
         }
-        capt_fire_page(j, j->hw_page);
-        if (j->io.read) {
+        if (!j->err)
+            capt_fire_page(j, j->hw_page);
+        if (j->io.read && !j->err) {
             for (int t = 0; t < 300; t++) {
                 if (capt_get_xstatus(j, true) < 0)
                     break;
                 if (j->page_out >= j->hw_page)
                     break;
-                if ((j->status0 & 0x0002u) || (j->status1 & 0x4000u)) {
-                    if (!(j->status1 & (0x0004u | 0x0080u)))
-                        break;  // out of paper and not printing/processing
+                if (capt_has_hard_error(j)) {
+                    j->err = true;
+                    break;
                 }
                 capt_sleep_ms(100);
+            }
+            if (!j->err && j->page_out < j->hw_page) {
+                CAPT_LOGW("page_end: page %u (hw=%u) did not exit (out=%u s0=%04x s1=%04x s2=%04x eng=%04x)",
+                          j->page_num, j->hw_page, j->page_out, j->status0, j->status1, j->status2, j->eng_status);
+                j->err = true;
             }
         }
         CAPT_LOGI("page_end pg=%u (hw=%u) sent=%u B dec=%u rx=%u out=%u s0=%04x s1=%04x", j->page_num, j->hw_page,
@@ -877,23 +1108,33 @@ static int job_end(void *job)
         if (page_begin(j, 1, 1, 1) == 0)
             page_end(j);
     }
-    if (!j->err) {
-        if (j->io.read) {
-            for (int t = 0; t < 300; t++) {
-                if (capt_get_xstatus(j, true) < 0)
-                    break;
-                if (j->page_completed >= j->hw_page)
-                    break;
-                if (((j->status0 & 0x0002u) || (j->status1 & 0x4000u)) && !(j->status1 & (0x0004u | 0x0080u)))
-                    break;
-                capt_sleep_ms(100);
+    if (!j->err && j->io.read) {
+        for (int t = 0; t < 300; t++) {
+            if (capt_get_xstatus(j, true) < 0)
+                break;
+            if (j->page_completed >= j->hw_page)
+                break;
+            if (capt_has_hard_error(j)) {
+                j->err = true;
+                break;
             }
+            capt_sleep_ms(100);
         }
+        if (!j->err && j->hw_page > 0 && j->page_completed < j->hw_page) {
+            CAPT_LOGW("job_end: page hw=%u did not complete (comp=%u out=%u s0=%04x s1=%04x eng=%04x)", j->hw_page,
+                      j->page_completed, j->page_out, j->status0, j->status1, j->eng_status);
+            j->err = true;
+        }
+    }
+    if (!j->io_err) {
+        bool saved_err = j->err;
+        j->err = false;
         capt_send_job_setup(j, 4, j->hw_page);
         uint8_t jbuf[2] = {(uint8_t)(j->job_id & 0xff), (uint8_t)(j->job_id >> 8)};
         capt_sendrecv(j, CAPT_JOB_END, jbuf, sizeof(jbuf), NULL, 0, NULL);
-        if (!j->err && j->io.flush && j->io.flush(j->io.ctx) < 0)
-            j->err = true;
+        if (j->io.flush && j->io.flush(j->io.ctx) < 0)
+            j->io_err = true;
+        j->err = saved_err || j->io_err;
     }
     int ret = j->err ? -1 : 0;
     CAPT_LOGI("job_end pages=%u ret=%d", j->page_num, ret);
@@ -966,6 +1207,8 @@ static const capt_model_t M_LBP6000 = {CAPT_LBP6000};
         .page_end = page_end,                                                                                          \
         .job_end = job_end,                                                                                            \
         .test_page = test_page,                                                                                        \
+        .status = capt_status,                                                                                         \
+        .poll_status = capt_idle_poll_status,                                                                          \
     }
 
 #define CANON_LBP(var, id_, mdl, pid, model_ptr) CANON_LBP_EX(var, id_, mdl, pid, false, model_ptr)
