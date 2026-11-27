@@ -6,14 +6,23 @@
 #include <string.h>
 
 #ifdef ESP_PLATFORM
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #define CAPT_LOGI(...) ESP_LOGI("capt", __VA_ARGS__)
 #define CAPT_LOGW(...) ESP_LOGW("capt", __VA_ARGS__)
+static inline void *capt_bulk_realloc(void *p, size_t n)
+{
+    return heap_caps_realloc(p, n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
 #else
 #define CAPT_LOGI(...) ((void)0)
 #define CAPT_LOGW(...) ((void)0)
+static inline void *capt_bulk_realloc(void *p, size_t n)
+{
+    return realloc(p, n);
+}
 #endif
 
 #include "mono_raster.h"
@@ -60,6 +69,7 @@ enum {
 };
 
 #define CAPT_BAND_LINES 70
+#define CAPT_DUPLEX_BUF_MAX (1024u * 1024u)
 
 typedef struct {
     const printer_driver_t *drv;
@@ -106,6 +116,14 @@ typedef struct {
     bool has_fifo_credits;
     bool page_fired;
     uint32_t page_bytes_sent;
+
+    uint8_t sheet_src;
+    uint8_t *dup_buf;
+    size_t dup_len;
+    size_t dup_cap;
+    bool dup_buffering;
+    bool dup_pending;
+    bool dup_streamed;
 } capt_job_t;
 
 typedef struct {
@@ -391,6 +409,9 @@ static bool capt_has_hard_error(const capt_job_t *j)
                            : (((j->status0 & 0x0002u) || (j->status1 & 0x4000u)) != 0);
     if (nopaper_bit && !(j->status1 & (0x0004u | 0x0080u)))
         return true;    // out of paper / print rejected and engine stopped
+    if (variant_of(j->drv) == CAPT_LBP3300 && (j->status1 & 0x0F00u) != 0 &&
+        !(j->status1 & (0x0004u | 0x0080u)))
+        return true;    // controller error (Cont[1] & 0x0F) with engine stopped
     return false;
 }
 
@@ -596,14 +617,15 @@ static int capt_fire_page(capt_job_t *j, uint16_t pg)
     if (j->page_fired || j->err)
         return j->err ? -1 : 0;
     j->page_fired = true;
-    if (capt_send_job_setup(j, 2, pg) < 0)
+    bool send_setup = variant_of(j->drv) != CAPT_LBP3300;
+    if (send_setup && capt_send_job_setup(j, 2, pg) < 0)
         return -1;
     capt_wait_ready(j);
     uint8_t fire[2] = {(uint8_t)(pg & 0xff), (uint8_t)(pg >> 8)};
     if (capt_sendrecv(j, CAPT_FIRE, fire, sizeof(fire), NULL, 0, NULL) < 0)
         return -1;
     capt_wait_ready(j);
-    if (capt_send_job_setup(j, 6, pg) < 0)
+    if (send_setup && capt_send_job_setup(j, 6, pg) < 0)
         return -1;
     CAPT_LOGI("fired pg=%u (sent=%u B fifo=%u dec=%u rx=%u)", pg, (unsigned)j->page_bytes_sent, j->fifo_free,
               j->page_decoding, j->page_received);
@@ -763,13 +785,8 @@ size_t canon_hiscoa_compress_band(const uint8_t *band, unsigned line_size, unsig
     return s.bitpos >> 3;
 }
 
-static int flush_band(capt_job_t *j, bool last_band)
+static int capt_send_comp_band(capt_job_t *j, const uint8_t *data, size_t clen)
 {
-    (void)last_band;
-    if (j->band_y <= 0 || j->err)
-        return j->err ? -1 : 0;
-    size_t clen = canon_hiscoa_compress_band(j->band, (unsigned)j->line_bytes, (unsigned)j->band_y, 0,
-                                             j->comp, j->comp_cap);
     size_t off = 0;
     while (off < clen && !j->err) {
         size_t chunk = clen - off;
@@ -807,11 +824,227 @@ static int flush_band(capt_job_t *j, bool last_band)
                 capt_wait_ready(j);
             }
         }
-        capt_send_flush(j, CAPT_PRINT_DATA, j->comp + off, chunk);
+        capt_send_flush(j, CAPT_PRINT_DATA, data + off, chunk);
         j->page_bytes_sent += (uint32_t)chunk;
         if (j->fifo_free > 0)
             j->fifo_free--;
         off += chunk;
+    }
+    return j->err ? -1 : 0;
+}
+
+static int capt_send_page_hdr(capt_job_t *j, uint8_t dup, bool new_sheet, bool duplex_select)
+{
+    static const uint8_t magic2[16] = {0xEE, 0xDB, 0xEA, 0xAD};
+    if (j->err)
+        return -1;
+
+    if (j->io.read) {
+        if (new_sheet) {
+            capt_poll_status(j);
+            if ((j->status0 & 0x0030u) ||
+                (variant_of(j->drv) == CAPT_LBP3300 && (j->status1 & 0x4F00u) != 0)) {
+                capt_sendrecv(j, CAPT_START_1, NULL, 0, NULL, 0, NULL);
+                capt_sendrecv(j, CAPT_START_2, NULL, 0, NULL, 0, NULL);
+                capt_sendrecv(j, CAPT_START_3, NULL, 0, NULL, 0, NULL);
+                capt_wait_ready(j);
+                capt_sendrecv(j, CAPT_UPLOAD_2, magic2, sizeof(magic2), NULL, 0, NULL);
+                capt_wait_ready(j);
+                j->hw_page = 0;
+            }
+            for (int t = 0; t < 120 && (j->status0 & 0x0004u); t++) {
+                capt_sleep_ms(100);
+                capt_poll_status(j);
+            }
+        }
+        capt_get_xstatus(j, true);
+    }
+    j->hw_page++;
+    j->page_fired = false;
+    j->page_bytes_sent = 0;
+
+    capt_variant_t v = variant_of(j->drv);
+    uint8_t sz = j->paper == 1 ? 0x0D : 0x02;   // Letter=0x0D, A4=0x02
+    uint8_t b2 = j->has_model_id ? j->model_id[0]
+                                 : ((v == CAPT_LBP2900 || v == CAPT_LBP3000 || v == CAPT_LBP3300) ? 0x30 : 0xBA);
+    uint8_t b3 = j->has_model_id ? j->model_id[1]
+                                 : ((v == CAPT_LBP2900 || v == CAPT_LBP3000 || v == CAPT_LBP3300) ? 0x2A : 0x09);
+    if (new_sheet) {
+        j->sheet_src = (v == CAPT_LBP3300) ? 0x01 : 0x00;
+        if (v == CAPT_LBP3300) {
+            uint16_t pw2 = (uint16_t)(j->paper_w >> 1);
+            uint16_t ph2 = (uint16_t)(j->paper_h >> 1);
+            uint8_t sel_in[8] = {
+                sz, 0x01,
+                (uint8_t)(pw2 & 0xff), (uint8_t)(pw2 >> 8),
+                (uint8_t)(ph2 & 0xff), (uint8_t)(ph2 >> 8),
+                0xFF, // Auto (Cassette 1 / Manual Feed)
+                (uint8_t)(duplex_select ? 0x01 : 0x00),
+            };
+            uint8_t sel_rep[8] = {0};
+            size_t sel_len = 0;
+            if (capt_sendrecv(j, CAPT_SELECT_INPUT, sel_in, sizeof(sel_in), sel_rep, sizeof(sel_rep), &sel_len) == 0 &&
+                j->io.read && sel_len >= 2) {
+                CAPT_LOGI("e1a9 select -> status=%02x slot=%02x", sel_rep[0], sel_rep[1]);
+                j->sheet_src = sel_rep[1];
+            }
+        }
+    }
+    uint8_t src = j->sheet_src;
+    uint8_t p20 = 0x00;
+    uint8_t pp[40] = {
+        0x00, 0x00, b2, b3, sz, dup, src, 0x00,
+        0x1C, 0x1C, 0x1C, 0x1C, 0x00, 0x11, 0x04, 0x00,
+        0x01, 0x01, 0x02, 0x00, p20, 0x00,
+        (uint8_t)(j->margin_top & 0xff), (uint8_t)(j->margin_top >> 8),
+        (uint8_t)(j->margin_left & 0xff), (uint8_t)(j->margin_left >> 8),
+        (uint8_t)(j->line_bytes & 0xff), (uint8_t)(j->line_bytes >> 8),
+        (uint8_t)(j->height & 0xff), (uint8_t)(j->height >> 8),
+        (uint8_t)(j->paper_w & 0xff), (uint8_t)(j->paper_w >> 8),
+        (uint8_t)(j->paper_h & 0xff), (uint8_t)(j->paper_h >> 8),
+        0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    };
+    uint8_t hs[8] = {
+        4, 12, 0x01, 0x01, 0, (uint8_t)(int8_t)-5, (uint8_t)(384 & 0xff), (uint8_t)(384 >> 8),
+    };
+    // Multi-command 0xD0A9 wrapping D0A0, D0A4, D0A1, D0A2
+    uint8_t multi[4 + sizeof(pp) + 4 + sizeof(hs) + 4 + 4];
+    size_t mp = 0;
+    multi[mp++] = 0xA0; multi[mp++] = 0xD0;
+    multi[mp++] = (uint8_t)(4 + sizeof(pp)); multi[mp++] = 0;
+    memcpy(multi + mp, pp, sizeof(pp));
+    mp += sizeof(pp);
+    multi[mp++] = 0xA4; multi[mp++] = 0xD0;
+    multi[mp++] = (uint8_t)(4 + sizeof(hs)); multi[mp++] = 0;
+    memcpy(multi + mp, hs, sizeof(hs));
+    mp += sizeof(hs);
+    multi[mp++] = 0xA1; multi[mp++] = 0xD0; multi[mp++] = 4; multi[mp++] = 0;
+    multi[mp++] = 0xA2; multi[mp++] = 0xD0; multi[mp++] = 4; multi[mp++] = 0;
+
+    capt_log_hex("d0a0", pp, sizeof(pp));
+    capt_send_flush(j, CAPT_SET_PARMS, multi, mp);
+    CAPT_LOGI("page_hdr hw=%u dup=%02x src=%02x %dx%d (%d B/line) err=%d", j->hw_page, dup, src, j->width, j->height,
+              j->line_bytes, j->err);
+    return j->err ? -1 : 0;
+}
+
+static int capt_finish_hw_page(capt_job_t *j, bool wait_out)
+{
+    if (!j->err)
+        capt_send_flush(j, CAPT_PRINT_DATA_END, NULL, 0);
+
+    if (!j->err) {
+        if (j->io.read) {
+            for (int t = 0; t < 120; t++) {
+                if (capt_get_xstatus(j, true) < 0)
+                    break;
+                if (j->page_received >= j->hw_page && j->page_decoding >= j->hw_page)
+                    break;
+                if (capt_has_hard_error(j)) {
+                    j->err = true;
+                    break;
+                }
+                capt_sleep_ms(100);
+            }
+        }
+        if (!j->err)
+            capt_fire_page(j, j->hw_page);
+        if (wait_out && j->io.read && !j->err) {
+            for (int t = 0; t < 300; t++) {
+                if (capt_get_xstatus(j, true) < 0)
+                    break;
+                if (j->page_out >= j->hw_page)
+                    break;
+                if (capt_has_hard_error(j)) {
+                    j->err = true;
+                    break;
+                }
+                capt_sleep_ms(100);
+            }
+            if (!j->err && j->page_out < j->hw_page) {
+                CAPT_LOGW("page_end: page %u (hw=%u) did not exit (out=%u s0=%04x s1=%04x s2=%04x eng=%04x)",
+                          j->page_num, j->hw_page, j->page_out, j->status0, j->status1, j->status2, j->eng_status);
+                j->err = true;
+            }
+        }
+        CAPT_LOGI("page_end pg=%u (hw=%u) sent=%u B dec=%u rx=%u out=%u s0=%04x s1=%04x", j->page_num, j->hw_page,
+                  (unsigned)j->page_bytes_sent, j->page_decoding, j->page_received, j->page_out, j->status0,
+                  j->status1);
+    }
+    return j->err ? -1 : 0;
+}
+
+static int capt_dup_buf_append(capt_job_t *j, const uint8_t *data, size_t clen)
+{
+    if (clen > CAPT_DUPLEX_BUF_MAX - 4u || j->dup_len > CAPT_DUPLEX_BUF_MAX - 4u - clen)
+        return -1;
+    size_t need = j->dup_len + 4u + clen;
+    if (need > j->dup_cap) {
+        size_t ncap = j->dup_cap ? j->dup_cap : (128u * 1024u);
+        while (ncap < need)
+            ncap = ncap <= CAPT_DUPLEX_BUF_MAX / 2u ? ncap * 2u : CAPT_DUPLEX_BUF_MAX;
+        uint8_t *nb = capt_bulk_realloc(j->dup_buf, ncap);
+        if (!nb)
+            return -1;
+        j->dup_buf = nb;
+        j->dup_cap = ncap;
+    }
+    uint32_t blen = (uint32_t)clen;
+    j->dup_buf[j->dup_len + 0] = (uint8_t)(blen & 0xffu);
+    j->dup_buf[j->dup_len + 1] = (uint8_t)((blen >> 8) & 0xffu);
+    j->dup_buf[j->dup_len + 2] = (uint8_t)((blen >> 16) & 0xffu);
+    j->dup_buf[j->dup_len + 3] = (uint8_t)((blen >> 24) & 0xffu);
+    memcpy(j->dup_buf + j->dup_len + 4u, data, clen);
+    j->dup_len += 4u + clen;
+    return 0;
+}
+
+static int capt_dup_buf_send_bands(capt_job_t *j)
+{
+    size_t off = 0;
+    while (off + 4u <= j->dup_len && !j->err) {
+        uint32_t clen = (uint32_t)j->dup_buf[off] | ((uint32_t)j->dup_buf[off + 1] << 8) |
+                        ((uint32_t)j->dup_buf[off + 2] << 16) | ((uint32_t)j->dup_buf[off + 3] << 24);
+        off += 4u;
+        if (clen > j->dup_len - off) {
+            j->err = true;
+            return -1;
+        }
+        capt_send_comp_band(j, j->dup_buf + off, clen);
+        off += clen;
+    }
+    return j->err ? -1 : 0;
+}
+
+static int capt_dup_buf_replay(capt_job_t *j, uint8_t dup, bool new_sheet, bool duplex_select, bool wait_out)
+{
+    if (capt_send_page_hdr(j, dup, new_sheet, duplex_select) < 0)
+        return -1;
+    capt_dup_buf_send_bands(j);
+    j->dup_len = 0;
+    j->dup_pending = false;
+    return capt_finish_hw_page(j, wait_out);
+}
+
+static int flush_band(capt_job_t *j, bool last_band)
+{
+    if (j->band_y <= 0 || j->err)
+        return j->err ? -1 : 0;
+    size_t clen = canon_hiscoa_compress_band(j->band, (unsigned)j->line_bytes, (unsigned)j->band_y,
+                                             last_band ? 1 : 0, j->comp, j->comp_cap);
+    if (j->dup_buffering) {
+        if (capt_dup_buf_append(j, j->comp, clen) < 0) {
+            CAPT_LOGW("duplex buffer full (%zu B), falling back to streaming", j->dup_len);
+            j->dup_buffering = false;
+            j->dup_streamed = true;
+            if (capt_send_page_hdr(j, 0x04, true, true) == 0 && capt_dup_buf_send_bands(j) == 0) {
+                j->dup_len = 0;
+                capt_send_comp_band(j, j->comp, clen);
+            }
+            j->dup_len = 0;
+        }
+    } else {
+        capt_send_comp_band(j, j->comp, clen);
     }
     j->band_y = 0;
     return j->err ? -1 : 0;
@@ -827,6 +1060,11 @@ static void capt_page_dims(const printer_driver_t *d, int dpi, int paper, int *w
     int mr = (int)((long)d->margin_right * dpi / 2540);
     int mt = (int)((long)d->margin_top * dpi / 2540);
     int mb = (int)((long)d->margin_bottom * dpi / 2540);
+    if (variant_of(d) == CAPT_LBP3300 && dpi == 600 && paper == 0) {
+        pw = 4960;
+        ph = 7014;
+        ml = mr = mt = mb = 120;
+    }
     int w = ((pw - ml - mr) + 31) & ~31;
     int h = ph - mt - mb;
     *w_out = w;
@@ -925,7 +1163,6 @@ static void *job_begin(const printer_driver_t *d, const printer_io_t *io, int dp
 
 static int page_begin(void *job, int src_w, int src_h, int bytes_pp)
 {
-    static const uint8_t magic2[16] = {0xEE, 0xDB, 0xEA, 0xAD};
     capt_job_t *j = job;
     if (j->err)
         return -1;
@@ -935,91 +1172,25 @@ static int page_begin(void *job, int src_w, int src_h, int bytes_pp)
     j->band_y = 0;
     j->total_y = 0;
     j->in_page = true;
-    j->page_fired = false;
-    j->page_bytes_sent = 0;
     j->page_num++;
 
-    if (j->io.read) {
-        capt_poll_status(j);
-        if (j->status0 & 0x0030u) {
-            capt_sendrecv(j, CAPT_START_1, NULL, 0, NULL, 0, NULL);
-            capt_sendrecv(j, CAPT_START_2, NULL, 0, NULL, 0, NULL);
-            capt_sendrecv(j, CAPT_START_3, NULL, 0, NULL, 0, NULL);
-            capt_wait_ready(j);
-            capt_sendrecv(j, CAPT_UPLOAD_2, magic2, sizeof(magic2), NULL, 0, NULL);
-            capt_wait_ready(j);
-            j->hw_page = 0;
-        }
-        for (int t = 0; t < 120 && (j->status0 & 0x0004u); t++) {
-            capt_sleep_ms(100);
-            capt_poll_status(j);
-        }
-        capt_get_xstatus(j, true);
+    bool lbp3300_dup = (variant_of(j->drv) == CAPT_LBP3300 && j->sides != PRINTER_SIDES_ONE_SIDED);
+    if (lbp3300_dup && (j->page_num % 2) == 1) {
+        j->dup_buffering = true;
+        j->dup_pending = false;
+        j->dup_streamed = false;
+        j->dup_len = 0;
+        CAPT_LOGI("page_begin pg=%u (buffered duplex front) %dx%d (%d B/line)", j->page_num, j->width, j->height,
+                  j->line_bytes);
+        return 0;
     }
-    j->hw_page++;
-
-    capt_variant_t v = variant_of(j->drv);
-    uint8_t sz = j->paper == 1 ? 0x0D : 0x02;   // Letter=0x0D, A4=0x02
-    uint8_t b2 = j->has_model_id ? j->model_id[0]
-                                 : ((v == CAPT_LBP2900 || v == CAPT_LBP3000 || v == CAPT_LBP3300) ? 0x30 : 0xBA);
-    uint8_t b3 = j->has_model_id ? j->model_id[1]
-                                 : ((v == CAPT_LBP2900 || v == CAPT_LBP3000 || v == CAPT_LBP3300) ? 0x2A : 0x09);
-    uint8_t src = (v == CAPT_LBP3300) ? 0x01 : 0x00;
-    if (v == CAPT_LBP3300) {
-        uint16_t pw2 = (uint16_t)(j->paper_w >> 1);
-        uint16_t ph2 = (uint16_t)(j->paper_h >> 1);
-        uint8_t sel_in[8] = {
-            sz, 0x01,
-            (uint8_t)(pw2 & 0xff), (uint8_t)(pw2 >> 8),
-            (uint8_t)(ph2 & 0xff), (uint8_t)(ph2 >> 8),
-            0xFF, // Auto (Cassette 1 / Manual Feed)
-            (uint8_t)(j->sides != PRINTER_SIDES_ONE_SIDED ? 0x01 : 0x00),
-        };
-        uint8_t sel_rep[8] = {0};
-        size_t sel_len = 0;
-        if (capt_sendrecv(j, CAPT_SELECT_INPUT, sel_in, sizeof(sel_in), sel_rep, sizeof(sel_rep), &sel_len) == 0 &&
-            j->io.read && sel_len >= 2) {
-            CAPT_LOGI("e1a9 select -> status=%02x slot=%02x", sel_rep[0], sel_rep[1]);
-            src = sel_rep[1];
-        }
+    if (lbp3300_dup && (j->page_num % 2) == 0) {
+        if (j->dup_pending)
+            return capt_send_page_hdr(j, 0x04, true, true);
+        j->dup_streamed = false;
+        return capt_send_page_hdr(j, 0x02, false, false);
     }
-    uint8_t dup = 0x00;
-    uint8_t p20 = 0x00;
-    if (v == CAPT_LBP3300 && j->sides != PRINTER_SIDES_ONE_SIDED)
-        dup = (j->page_num % 2) == 1 ? 0x04 : 0x02;
-    uint8_t pp[40] = {
-        0x00, 0x00, b2, b3, sz, dup, src, 0x00,
-        0x1C, 0x1C, 0x1C, 0x1C, 0x00, 0x11, 0x04, 0x00,
-        0x01, 0x01, 0x02, 0x00, p20, 0x00,
-        (uint8_t)(j->margin_top & 0xff), (uint8_t)(j->margin_top >> 8),
-        (uint8_t)(j->margin_left & 0xff), (uint8_t)(j->margin_left >> 8),
-        (uint8_t)(j->line_bytes & 0xff), (uint8_t)(j->line_bytes >> 8),
-        (uint8_t)(j->height & 0xff), (uint8_t)(j->height >> 8),
-        (uint8_t)(j->paper_w & 0xff), (uint8_t)(j->paper_w >> 8),
-        (uint8_t)(j->paper_h & 0xff), (uint8_t)(j->paper_h >> 8),
-        0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-    };
-    uint8_t hs[8] = {
-        4, 12, 0x01, 0x01, 0, (uint8_t)(int8_t)-5, (uint8_t)(384 & 0xff), (uint8_t)(384 >> 8),
-    };
-    // Multi-command 0xD0A9 wrapping D0A0, D0A4, D0A1, D0A2
-    uint8_t multi[4 + sizeof(pp) + 4 + sizeof(hs) + 4 + 4];
-    size_t mp = 0;
-    multi[mp++] = 0xA0; multi[mp++] = 0xD0;
-    multi[mp++] = (uint8_t)(4 + sizeof(pp)); multi[mp++] = 0;
-    memcpy(multi + mp, pp, sizeof(pp));
-    mp += sizeof(pp);
-    multi[mp++] = 0xA4; multi[mp++] = 0xD0;
-    multi[mp++] = (uint8_t)(4 + sizeof(hs)); multi[mp++] = 0;
-    memcpy(multi + mp, hs, sizeof(hs));
-    mp += sizeof(hs);
-    multi[mp++] = 0xA1; multi[mp++] = 0xD0; multi[mp++] = 4; multi[mp++] = 0;
-    multi[mp++] = 0xA2; multi[mp++] = 0xD0; multi[mp++] = 4; multi[mp++] = 0;
-
-    capt_log_hex("d0a0", pp, sizeof(pp));
-    capt_send_flush(j, CAPT_SET_PARMS, multi, mp);
-    CAPT_LOGI("page_begin pg=%u %dx%d (%d B/line) err=%d", j->page_num, j->width, j->height, j->line_bytes, j->err);
-    return j->err ? -1 : 0;
+    return capt_send_page_hdr(j, 0x00, true, false);
 }
 
 static int page_line(void *job, int y, const uint8_t *px)
@@ -1040,11 +1211,8 @@ static int page_line(void *job, int y, const uint8_t *px)
     return 0;
 }
 
-static int page_end(void *job)
+static void capt_flush_blank_tail(capt_job_t *j)
 {
-    capt_job_t *j = job;
-    if (!j->in_page)
-        return 0;
     while (!j->err && j->total_y < j->height) {
         memset(j->band + (size_t)j->band_y * (size_t)j->line_bytes, 0, (size_t)j->line_bytes);
         j->band_y++;
@@ -1053,49 +1221,30 @@ static int page_end(void *job)
             flush_band(j, false);
     }
     flush_band(j, true);
-    j->in_page = false;
-    if (!j->err)
-        capt_send_flush(j, CAPT_PRINT_DATA_END, NULL, 0);
+}
 
-    if (!j->err) {
-        if (j->io.read) {
-            for (int t = 0; t < 120; t++) {
-                if (capt_get_xstatus(j, true) < 0)
-                    break;
-                if (j->page_received >= j->hw_page && j->page_decoding >= j->hw_page)
-                    break;
-                if (capt_has_hard_error(j)) {
-                    j->err = true;
-                    break;
-                }
-                capt_sleep_ms(100);
-            }
-        }
-        if (!j->err)
-            capt_fire_page(j, j->hw_page);
-        if (j->io.read && !j->err) {
-            for (int t = 0; t < 300; t++) {
-                if (capt_get_xstatus(j, true) < 0)
-                    break;
-                if (j->page_out >= j->hw_page)
-                    break;
-                if (capt_has_hard_error(j)) {
-                    j->err = true;
-                    break;
-                }
-                capt_sleep_ms(100);
-            }
-            if (!j->err && j->page_out < j->hw_page) {
-                CAPT_LOGW("page_end: page %u (hw=%u) did not exit (out=%u s0=%04x s1=%04x s2=%04x eng=%04x)",
-                          j->page_num, j->hw_page, j->page_out, j->status0, j->status1, j->status2, j->eng_status);
-                j->err = true;
-            }
-        }
-        CAPT_LOGI("page_end pg=%u (hw=%u) sent=%u B dec=%u rx=%u out=%u s0=%04x s1=%04x", j->page_num, j->hw_page,
-                  (unsigned)j->page_bytes_sent, j->page_decoding, j->page_received, j->page_out, j->status0,
-                  j->status1);
+static int page_end(void *job)
+{
+    capt_job_t *j = job;
+    if (!j->in_page)
+        return 0;
+    capt_flush_blank_tail(j);
+    j->in_page = false;
+
+    if (j->dup_buffering) {
+        j->dup_buffering = false;
+        j->dup_pending = !j->err;
+        CAPT_LOGI("page_end pg=%u buffered (%zu B) err=%d", j->page_num, j->dup_len, j->err);
+        return j->err ? -1 : 0;
     }
-    return j->err ? -1 : 0;
+    if (j->dup_streamed)
+        return capt_finish_hw_page(j, false);
+    if (variant_of(j->drv) == CAPT_LBP3300 && j->sides != PRINTER_SIDES_ONE_SIDED && j->dup_pending) {
+        if (capt_finish_hw_page(j, false) < 0)
+            return -1;
+        return capt_dup_buf_replay(j, 0x02, false, false, true);
+    }
+    return capt_finish_hw_page(j, true);
 }
 
 static int job_end(void *job)
@@ -1103,10 +1252,16 @@ static int job_end(void *job)
     capt_job_t *j = job;
     if (j->in_page && !j->err)
         page_end(j);
-    if (!j->err && variant_of(j->drv) == CAPT_LBP3300 && j->sides != PRINTER_SIDES_ONE_SIDED &&
-        (j->page_num % 2) == 1) {
-        if (page_begin(j, 1, 1, 1) == 0)
-            page_end(j);
+    if (!j->err && j->dup_pending) {
+        capt_dup_buf_replay(j, 0x00, true, false, true);
+    } else if (!j->err && j->dup_streamed) {
+        j->dup_streamed = false;
+        if (capt_send_page_hdr(j, 0x02, false, false) == 0) {
+            j->band_y = 0;
+            j->total_y = 0;
+            capt_flush_blank_tail(j);
+            capt_finish_hw_page(j, true);
+        }
     }
     if (!j->err && j->io.read) {
         for (int t = 0; t < 300; t++) {
@@ -1138,6 +1293,7 @@ static int job_end(void *job)
     }
     int ret = j->err ? -1 : 0;
     CAPT_LOGI("job_end pages=%u ret=%d", j->page_num, ret);
+    free(j->dup_buf);
     free(j->density);
     free(j->band);
     free(j->comp);

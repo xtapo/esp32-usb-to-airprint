@@ -7,13 +7,15 @@ CONFIG_STATUS_LED_BRIGHTNESS=10
 # 4 MB app slots (WiFi + mDNS + printing), room for OTA later
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
-# ESP32-S3-N16R8: 8 MB octal PSRAM. Allocations up to 16 KB (the per-line
-# conversion buffers) stay in faster internal RAM
+# ESP32-S3-N16R8: 8 MB octal PSRAM. Hot per-line buffers explicitly use
+# AP_MALLOC_FAST/BJL_MALLOC_FAST in internal RAM; allocations > 4 KB and Wi-Fi/lwIP
+# buffers use PSRAM so internal DRAM stays free for thread stacks.
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_USE_MALLOC=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 # boot without PSRAM rather than abort (e.g. under QEMU)
 CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 # bigger TCP windows: a page is several MB of raster

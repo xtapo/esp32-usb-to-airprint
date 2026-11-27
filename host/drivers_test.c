@@ -302,15 +302,9 @@ static unsigned hs_get_gamma(hs_bit_t *b)
     return ((1u << (ord + 2u)) - 1u - nbits);
 }
 
-static void hiscoa_roundtrip_check_mode(const uint8_t *band, unsigned ls, unsigned nlines, int eob_last,
-                                        const char *name)
+static size_t hiscoa_decode_band(const uint8_t *comp, size_t clen, unsigned ls, unsigned nlines, uint8_t *dec,
+                                 int *eob_out)
 {
-    size_t cap = (size_t)ls * nlines * 2u + 64u;
-    uint8_t *comp = malloc(cap);
-    uint8_t *dec = calloc(nlines, ls);
-    size_t clen = canon_hiscoa_compress_band(band, ls, nlines, eob_last, comp, cap);
-    CHECK(clen > 0 && (clen % 4u) == 0, "%s: Hi-SCoA alignment/len %zu", name, clen);
-
     hs_bit_t br = {comp, clen, 0};
     uint8_t stash[16] = {0};
     unsigned nstash = 0;
@@ -318,6 +312,8 @@ static void hiscoa_roundtrip_check_mode(const uint8_t *band, unsigned ls, unsign
     size_t out_pos = 0;
     size_t total = (size_t)ls * nlines;
     unsigned prefix = 0;
+    if (eob_out)
+        *eob_out = -1;
 
     while (out_pos <= total) {
         if (br.bitpos >= br.in_bytes * 8u)
@@ -329,7 +325,8 @@ static void hiscoa_roundtrip_check_mode(const uint8_t *band, unsigned ls, unsign
             break;
         if (cmd == 7) {
             uint32_t eob = hs_get_bits(&br, 2);
-            CHECK(eob == (uint32_t)(eob_last ? 1 : 0), "%s: unexpected EOB %u", name, (unsigned)eob);
+            if (eob_out)
+                *eob_out = (int)eob;
             break;
         }
         if (cmd == 1) {
@@ -391,7 +388,23 @@ static void hiscoa_roundtrip_check_mode(const uint8_t *band, unsigned ls, unsign
             }
         }
     }
+    return out_pos;
+}
 
+static void hiscoa_roundtrip_check_mode(const uint8_t *band, unsigned ls, unsigned nlines, int eob_last,
+                                        const char *name)
+{
+    size_t cap = (size_t)ls * nlines * 2u + 64u;
+    uint8_t *comp = malloc(cap);
+    uint8_t *dec = calloc(nlines, ls);
+    size_t clen = canon_hiscoa_compress_band(band, ls, nlines, eob_last, comp, cap);
+    CHECK(clen > 0 && (clen % 4u) == 0, "%s: Hi-SCoA alignment/len %zu", name, clen);
+
+    int eob = -1;
+    size_t total = (size_t)ls * nlines;
+    size_t out_pos = hiscoa_decode_band(comp, clen, ls, nlines, dec, &eob);
+
+    CHECK(eob == (eob_last ? 1 : 0), "%s: unexpected EOB %d", name, eob);
     CHECK(out_pos == total && memcmp(dec, band, total) == 0, "%s: Hi-SCoA round-trip mismatch (got %zu/%zu)", name,
           out_pos, total);
     free(comp);
@@ -490,6 +503,8 @@ typedef struct {
     uint8_t r26;
     bool block_output;
     int cmds_seen[8]; // 0:A1A1, 1:A2A0, 2:D0A9, 3:C0A0, 4:C0A4, 5:E0A7, 6:E0A9
+    int e1a9_count;
+    int a0a8_count;
 } mock_capt_t;
 
 static int mock_capt_write(void *ctx, const uint8_t *data, size_t len)
@@ -521,6 +536,7 @@ static int mock_capt_write(void *ctx, const uint8_t *data, size_t len)
             uint8_t r[6] = {0xA0, 0xE0, 0x06, 0x00, 0x00, 0x01};
             memcpy(m->reply, r, 6); m->rlen = 6; m->rpos = 0;
         } else if (cmd == 0xE1A9) {
+            m->e1a9_count++;
             uint8_t r[6] = {0xA9, 0xE1, 0x06, 0x00, 0x00, 0x01};
             memcpy(m->reply, r, 6); m->rlen = 6; m->rpos = 0;
         } else if (cmd == 0xE0A1 || cmd == 0xE0A2 || cmd == 0xE0A3 ||
@@ -542,6 +558,7 @@ static int mock_capt_write(void *ctx, const uint8_t *data, size_t len)
             uint8_t r[6] = {0xA9, 0xE0, 0x06, 0x00, 0x00, 0x00};
             memcpy(m->reply, r, 6); m->rlen = 6; m->rpos = 0;
         } else if (cmd == 0xA0A8) {
+            m->a0a8_count++;
             memset(m->reply, 0, 88);
             m->reply[0] = 0xA8; m->reply[1] = 0xA0; m->reply[2] = 88; m->reply[3] = 0;
             uint16_t pdec = m->pages_started ? m->pages_started : 1;
@@ -785,10 +802,124 @@ int main(void)
                 CHECK(pp[5] == (found_pages == 1 ? 0x04 : 0x02), "lbp3300 page %d pp[5] duplex side", found_pages);
                 CHECK(pp[6] == 0x01, "lbp3300 page %d pp[6] cassette 1", found_pages);
                 CHECK(pp[20] == 0x00, "lbp3300 page %d pp[20] flag", found_pages);
+                uint16_t mt = (uint16_t)(pp[22] | (pp[23] << 8));
+                uint16_t ml = (uint16_t)(pp[24] | (pp[25] << 8));
+                uint16_t lb = (uint16_t)(pp[26] | (pp[27] << 8));
+                uint16_t ph_area = (uint16_t)(pp[28] | (pp[29] << 8));
+                uint16_t pw = (uint16_t)(pp[30] | (pp[31] << 8));
+                uint16_t ph = (uint16_t)(pp[32] | (pp[33] << 8));
+                CHECK(mt == 120 && ml == 120 && lb == 592 && ph_area == 6774 && pw == 4960 && ph == 7014,
+                      "lbp3300 page %d A4 D0A0 geometry %u/%u %u %u %ux%u", found_pages, mt, ml, lb, ph_area, pw, ph);
             }
         }
         CHECK(found_pages == 2, "lbp3300 expected 2 D0A0 blocks, found %d", found_pages);
+
+        // Walk top-level CAPT packets to verify E1A1 flags and per-page Hi-SCoA EOB=1
+        int e1a1_fg1 = 0, e1a1_fg2 = 0, e1a1_fg4 = 0, e1a1_fg6 = 0;
+        int eob1_pages = 0, page_bands = 0;
+        size_t last_c0a0_off = 0, last_c0a0_len = 0;
+        uint8_t *band_dec = malloc(592u * 70u);
+        for (size_t k = 0; k + 4 <= mc.tx.len;) {
+            uint16_t cmd = (uint16_t)(mc.tx.buf[k] | (mc.tx.buf[k + 1] << 8));
+            uint16_t plen = (uint16_t)(mc.tx.buf[k + 2] | (mc.tx.buf[k + 3] << 8));
+            CHECK(plen >= 4 && k + plen <= mc.tx.len, "lbp3300 packet framing at %zu len=%u", k, plen);
+            if (plen < 4 || k + plen > mc.tx.len)
+                break;
+            if (cmd == 0xE1A1 && plen >= 21) {
+                uint8_t fg = mc.tx.buf[k + 4 + 16];
+                if (fg == 1)
+                    e1a1_fg1++;
+                else if (fg == 2)
+                    e1a1_fg2++;
+                else if (fg == 4)
+                    e1a1_fg4++;
+                else if (fg == 6)
+                    e1a1_fg6++;
+            } else if (cmd == 0xC0A0 && plen > 4) {
+                if (last_c0a0_len > 0) {
+                    int eob = -1;
+                    size_t out_pos = hiscoa_decode_band(mc.tx.buf + last_c0a0_off, last_c0a0_len, 592u, 70u, band_dec,
+                                                        &eob);
+                    CHECK(out_pos == 592u * 70u && eob == 0, "lbp3300 mid band %d eob=%d out=%zu", page_bands, eob,
+                          out_pos);
+                }
+                last_c0a0_off = k + 4;
+                last_c0a0_len = (size_t)(plen - 4);
+                page_bands++;
+            } else if (cmd == 0xC0A4) {
+                CHECK(last_c0a0_len > 0 && page_bands == 97, "lbp3300 page bands=%d before C0A4", page_bands);
+                if (last_c0a0_len > 0) {
+                    int eob = -1;
+                    size_t out_pos = hiscoa_decode_band(mc.tx.buf + last_c0a0_off, last_c0a0_len, 592u, 54u, band_dec,
+                                                        &eob);
+                    CHECK(out_pos == 592u * 54u && eob == 1, "lbp3300 last band eob=%d out=%zu", eob, out_pos);
+                    if (eob == 1)
+                        eob1_pages++;
+                }
+                last_c0a0_len = 0;
+                page_bands = 0;
+            }
+            k += plen;
+        }
+        free(band_dec);
+        CHECK(e1a1_fg1 == 1 && e1a1_fg4 == 1 && e1a1_fg2 == 0 && e1a1_fg6 == 0,
+              "lbp3300 E1A1 fg counts: fg1=%d fg2=%d fg4=%d fg6=%d", e1a1_fg1, e1a1_fg2, e1a1_fg4, e1a1_fg6);
+        CHECK(eob1_pages == 2, "lbp3300 expected eob=1 on 2 pages, got %d", eob1_pages);
+        int found_e1a9 = 0;
+        for (size_t k = 0; k + 12 <= mc.tx.len; k++) {
+            if (mc.tx.buf[k] == 0xA9 && mc.tx.buf[k + 1] == 0xE1 && mc.tx.buf[k + 2] == 0x0C && mc.tx.buf[k + 3] == 0x00) {
+                found_e1a9++;
+                CHECK(mc.tx.buf[k + 11] == 0x01, "lbp3300 E1A9 duplex flag expected 0x01, got %02x",
+                      mc.tx.buf[k + 11]);
+            }
+        }
+        CHECK(mc.e1a9_count == 1 && found_e1a9 == 1, "lbp3300 expected 1 E1A9 per sheet, got %d/%d",
+              mc.e1a9_count, found_e1a9);
         CHECK(mc.pages_started == 2 && mc.pages_fired == 2, "lbp3300 2-page counters %u/%u", mc.pages_started,
+              mc.pages_fired);
+        free(mc.tx.buf);
+    }
+    {
+        // 1-page (odd) LBP3300 duplex job must print unpaired page as simplex
+        const printer_driver_t *d = printer_driver_find("canon-lbp3300");
+        CHECK(d != NULL, "canon-lbp3300 1p duplex");
+        mock_capt_t mc = {.bcd_a2a0 = true};
+        printer_io_t io = {.write = mock_capt_write,
+                           .flush = mock_capt_flush,
+                           .read = mock_capt_read,
+                           .sides = PRINTER_SIDES_TWO_SIDED_LONG_EDGE,
+                           .ctx = &mc};
+        void *job = d->job_begin(d, &io, 600, 0);
+        CHECK(job != NULL, "lbp3300 1p job_begin");
+        uint8_t px[64];
+        memset(px, 0x40, sizeof(px));
+        CHECK(d->page_begin(job, 64, 16, 1) == 0, "lbp3300 1p page_begin");
+        for (int y = 0; y < 16; y++)
+            CHECK(d->page_line(job, y, px) == 0, "lbp3300 1p page_line");
+        CHECK(d->page_end(job) == 0, "lbp3300 1p page_end");
+        CHECK(d->job_end(job) == 0, "lbp3300 1p job_end");
+
+        int found_pages = 0;
+        for (size_t k = 0; k + 44 <= mc.tx.len; k++) {
+            if (mc.tx.buf[k] == 0xA0 && mc.tx.buf[k + 1] == 0xD0 && mc.tx.buf[k + 2] == 0x2C && mc.tx.buf[k + 3] == 0x00) {
+                const uint8_t *pp = mc.tx.buf + k + 4;
+                found_pages++;
+                CHECK(pp[5] == 0x00, "lbp3300 1p odd pp[5] expected 0x00, got %02x", pp[5]);
+                CHECK(pp[6] == 0x01, "lbp3300 1p odd pp[6] cassette 1");
+            }
+        }
+        int found_e1a9 = 0;
+        for (size_t k = 0; k + 12 <= mc.tx.len; k++) {
+            if (mc.tx.buf[k] == 0xA9 && mc.tx.buf[k + 1] == 0xE1 && mc.tx.buf[k + 2] == 0x0C && mc.tx.buf[k + 3] == 0x00) {
+                found_e1a9++;
+                CHECK(mc.tx.buf[k + 11] == 0x00, "lbp3300 1p E1A9 duplex flag expected 0x00, got %02x",
+                      mc.tx.buf[k + 11]);
+            }
+        }
+        CHECK(found_pages == 1 && mc.e1a9_count == 1 && found_e1a9 == 1,
+              "lbp3300 1p odd expected 1 page & 1 E1A9, got pages=%d e1a9=%d/%d", found_pages, mc.e1a9_count,
+              found_e1a9);
+        CHECK(mc.pages_started == 1 && mc.pages_fired == 1, "lbp3300 1p counters %u/%u", mc.pages_started,
               mc.pages_fired);
         free(mc.tx.buf);
     }
@@ -949,6 +1080,36 @@ int main(void)
                 has_empty = true;
         CHECK(has_empty, "lbp3300 fail expected media-empty-error in status");
         free(mc.tx.buf);
+
+        // Controller error (Cont[1]=0x02 -> status1=0x0200, engine stopped) must fail fast without 30s timeout loop
+        {
+            mock_capt_t mc_err = {
+                .status1 = 0x0200,
+                .custom_status2 = true,
+                .status2 = 0x0040,
+                .block_output = true,
+            };
+            printer_io_t io_err = {
+                .write = mock_capt_write,
+                .flush = mock_capt_flush,
+                .read = mock_capt_read,
+                .ctx = &mc_err,
+            };
+            void *ejob = d->job_begin(d, &io_err, 600, 0);
+            CHECK(ejob != NULL, "lbp3300 ctrl-err job_begin");
+            CHECK(d->page_begin(ejob, 64, 16, 1) == 0, "lbp3300 ctrl-err page_begin");
+            for (int y = 0; y < 16; y++)
+                CHECK(d->page_line(ejob, y, px) == 0, "lbp3300 ctrl-err page_line");
+            CHECK(d->page_end(ejob) != 0, "lbp3300 ctrl-err expected page_end failure");
+            CHECK(d->job_end(ejob) != 0, "lbp3300 ctrl-err expected job_end failure");
+            CHECK(mc_err.a0a8_count < 30, "lbp3300 ctrl-err did not fail fast (a0a8=%d)", mc_err.a0a8_count);
+            airprint_status_t est = {.connected = true};
+            d->status(NULL, NULL, NULL, &est);
+            CHECK(est.nreasons >= 1 && strcmp(est.reasons[0], "other-error") == 0 &&
+                      strcmp(est.message, "Printer error") == 0,
+                  "lbp3300 ctrl-err expected other-error / Printer error, got %d/%s", est.nreasons, est.message);
+            free(mc_err.tx.buf);
+        }
     }
 
     printf("drivers_test: %s (%d failures, %d drivers registered)\n", failures ? "FAILED" : "OK", failures, drv_count);

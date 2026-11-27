@@ -108,6 +108,11 @@
     return v.trim() !== '0.0.0.0';
   }
 
+  function isValidHostname(v: string): boolean {
+    const s = v.trim();
+    return !s || /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/i.test(s);
+  }
+
   async function loadInfo() {
     try {
       const r = await fetch('/api/wifi', { cache: 'no-store' });
@@ -152,6 +157,10 @@
       toast(i18n.t.wifi.errSsid, 'error');
       return;
     }
+    if (!isValidHostname(hostname)) {
+      toast(i18n.t.wifi.errHostname, 'error');
+      return;
+    }
     if (useStaticIp) {
       if (!isValidIpv4(staticIp)) {
         toast(i18n.t.wifi.errStaticIp, 'error');
@@ -179,7 +188,7 @@
           ssid: ssid.trim(),
           password: clearWifiPass ? '' : password,
           clear_password: clearWifiPass,
-          hostname: hostname.trim(),
+          hostname: hostname.trim().toLowerCase(),
           printer_name: printerName.trim(),
           use_static_ip: useStaticIp,
           static_ip: useStaticIp ? staticIp.trim() : '',
@@ -437,6 +446,7 @@
       <label class="field">
         <span class="label">{i18n.t.wifi.hostField}</span>
         <input class="input" bind:value={hostname} placeholder="canon-mg2500" maxlength="32" />
+        <span class="small muted">{i18n.t.wifi.hostHint}</span>
       </label>
       <label class="field">
         <span class="label">{i18n.t.wifi.printerNameField}</span>

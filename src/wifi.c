@@ -78,6 +78,76 @@ bool wifi_parse_ipv4(const char *s, uint32_t *out)
     return true;
 }
 
+bool wifi_is_valid_hostname(const char *s)
+{
+    if (!s || !*s)
+        return false;
+    size_t len = strlen(s);
+    if (len > 32)
+        return false;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        bool alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+        if (!alnum && c != '-')
+            return false;
+        if ((i == 0 || i == len - 1) && c == '-')
+            return false;
+    }
+    return true;
+}
+
+void wifi_sanitize_hostname(const char *src, char *dst, size_t dst_n)
+{
+    if (!dst || dst_n == 0)
+        return;
+    size_t max_out = dst_n - 1;
+    if (max_out > 32)
+        max_out = 32;
+    size_t slen = src ? strlen(src) : 0;
+    if (slen > 6) {
+        static const char loc[6] = {'.', 'l', 'o', 'c', 'a', 'l'};
+        bool has_local = true;
+        for (size_t i = 0; i < 6; i++) {
+            unsigned char c = (unsigned char)src[slen - 6 + i];
+            if (c >= 'A' && c <= 'Z')
+                c = (unsigned char)(c - 'A' + 'a');
+            if ((char)c != loc[i]) {
+                has_local = false;
+                break;
+            }
+        }
+        if (has_local)
+            slen -= 6;
+    }
+    size_t p = 0;
+    bool prev_dash = false;
+    for (size_t i = 0; i < slen && p < max_out; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c >= 'A' && c <= 'Z')
+            c = (unsigned char)(c - 'A' + 'a');
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+            dst[p++] = (char)c;
+            prev_dash = false;
+        } else if (p > 0 && !prev_dash) {
+            dst[p++] = '-';
+            prev_dash = true;
+        }
+    }
+    while (p > 0 && dst[p - 1] == '-')
+        p--;
+    dst[p] = 0;
+    if (p == 0) {
+        const char *fb = HOSTNAME;
+        if (!fb || !fb[0])
+            fb = "airprint";
+        size_t flen = strlen(fb);
+        if (flen > max_out)
+            flen = max_out;
+        memcpy(dst, fb, flen);
+        dst[flen] = 0;
+    }
+}
+
 static void apply_static_dns(void)
 {
     if (!s_sta_netif)
@@ -258,8 +328,11 @@ esp_err_t wifi_save_config(const wifi_stored_cfg_t *cfg)
     esp_err_t err = nvs_set_str(h, "ssid", cfg->ssid);
     if (err == ESP_OK)
         err = nvs_set_str(h, "pass", cfg->password);
-    if (err == ESP_OK && cfg->hostname[0])
-        err = nvs_set_str(h, "host", cfg->hostname);
+    if (err == ESP_OK && cfg->hostname[0]) {
+        char clean_host[33];
+        wifi_sanitize_hostname(cfg->hostname, clean_host, sizeof(clean_host));
+        err = nvs_set_str(h, "host", clean_host);
+    }
     if (err == ESP_OK && cfg->printer_name[0])
         err = nvs_set_str(h, "pname", cfg->printer_name);
     if (err == ESP_OK)
@@ -388,9 +461,12 @@ esp_err_t wifi_start(const char *default_hostname)
     bool has_nvs = wifi_load_config(&stored);
     snprintf(s_ssid, sizeof(s_ssid), "%s", has_nvs ? stored.ssid : WIFI_SSID);
     snprintf(s_password, sizeof(s_password), "%s", has_nvs ? stored.password : WIFI_PASSWORD);
-    snprintf(s_hostname, sizeof(s_hostname), "%s",
-             (has_nvs && stored.hostname[0]) ? stored.hostname
-                                             : (default_hostname && default_hostname[0] ? default_hostname : HOSTNAME));
+    const char *raw_host =
+        (has_nvs && stored.hostname[0]) ? stored.hostname
+                                        : (default_hostname && default_hostname[0] ? default_hostname : HOSTNAME);
+    wifi_sanitize_hostname(raw_host, s_hostname, sizeof(s_hostname));
+    if (strcmp(raw_host, s_hostname) != 0)
+        ESP_LOGW(TAG, "sanitized invalid hostname \"%s\" -> \"%s\" for mDNS/AirPrint", raw_host, s_hostname);
     snprintf(s_printer_name, sizeof(s_printer_name), "%s",
              (has_nvs && stored.printer_name[0]) ? stored.printer_name : PRINTER_NAME);
     if (has_nvs) {

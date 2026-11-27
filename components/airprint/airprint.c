@@ -24,6 +24,7 @@
 #include "events.h"
 #include "icon_png.h"
 #include "ipp.h"
+#include "mem.h"
 #include "printer_driver.h"
 #include "raster.h"
 
@@ -41,7 +42,7 @@
 // iOS keeps several keep-alive connections open while it watches a job
 #define MAX_CONNECTIONS 8
 #ifdef ESP_PLATFORM
-#define CONN_STACK_SIZE (12 * 1024)     // the print pipeline runs on this stack
+#define CONN_STACK_SIZE (10 * 1024)     // the print pipeline runs on this stack
 #define LISTEN_STACK_SIZE (4 * 1024)
 #else
 #define CONN_STACK_SIZE (512 * 1024)    // host build runs with sanitizers
@@ -625,7 +626,8 @@ static void add_printer_attrs(ipp_out_t *o, const conn_t *c, const filter_t *f)
             ipp_out_strs(o, IPP_TAG_KEYWORD, "print-color-mode-supported",
                          (const char *[]){"auto", "color", "monochrome", NULL});
         else
-            ipp_out_str(o, IPP_TAG_KEYWORD, "print-color-mode-supported", "monochrome");
+            ipp_out_strs(o, IPP_TAG_KEYWORD, "print-color-mode-supported",
+                         (const char *[]){"auto", "monochrome", NULL});
     }
     if (W("print-content-optimize-default"))
         ipp_out_str(o, IPP_TAG_KEYWORD, "print-content-optimize-default", "auto");
@@ -1181,7 +1183,9 @@ static int check_job_request(const ipp_request_t *req, ipp_out_t *unsup)
 
 static void handle_ipp(conn_t *c)
 {
-    ipp_request_t *req = calloc(1, sizeof(*req));
+    ipp_request_t *req = AP_MALLOC_BULK(sizeof(*req));
+    if (req)
+        memset(req, 0, sizeof(*req));
     ipp_out_t out, unsup;
     ipp_out_init(&out);
     ipp_out_init(&unsup);
@@ -1696,7 +1700,9 @@ static void *listen_thread(void *arg)
         pthread_mutex_unlock(&s_lock);
         if (full)
             LOGW("too many connections (%d), refusing one", MAX_CONNECTIONS);
-        conn_t *c = full ? NULL : calloc(1, sizeof(*c));
+        conn_t *c = full ? NULL : AP_MALLOC_BULK(sizeof(*c));
+        if (c)
+            memset(c, 0, sizeof(*c));
         if (!c) {
             if (!full) {
                 pthread_mutex_lock(&s_lock);
@@ -1712,7 +1718,9 @@ static void *listen_thread(void *arg)
         pthread_attr_setstacksize(&attr, CONN_STACK_SIZE);
         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
         pthread_t th;
-        if (pthread_create(&th, &attr, conn_thread, c) != 0) {
+        int err = pthread_create(&th, &attr, conn_thread, c);
+        if (err != 0) {
+            LOGW("cannot create connection thread (active %d, err %d)", s_connections, err);
             close(fd);
             free(c);
             pthread_mutex_lock(&s_lock);

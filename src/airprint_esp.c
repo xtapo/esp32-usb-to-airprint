@@ -47,7 +47,7 @@ static int64_t s_last_poll_us;
 
 // The shared buffer takes all the PSRAM but this much, left for everything
 // else (encoder strips, raster buffers, ...)
-#define PSRAM_RESERVE (512 * 1024)
+#define PSRAM_RESERVE (1536 * 1024)
 #define SHARED_BUF_MIN (1024 * 1024)
 
 // MODE=dev: no printer; jobs are converted, checksummed and kept in the
@@ -391,7 +391,7 @@ static esp_err_t announce(const char *hostname)
         {"Duplex", drv->duplex ? "T" : "F"},
         {"Copies", "F"},
         {"kind", "document"},
-        {"PaperMax", "<legal-A4"},     // up to A4
+        {"PaperMax", "legal-A4"},     // up to A4
         {"usb_MFG", drv->usb_mfg},
         {"usb_MDL", drv->usb_mdl},
         {"air", "none"},

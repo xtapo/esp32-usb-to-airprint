@@ -352,6 +352,22 @@ bool wifi_portal_http(airprint_http_t *h, const char *method, const char *path)
         if (!cfg.password[0] && !clear_password)
             wifi_preserve_sta_password(cfg.ssid, cfg.password, sizeof(cfg.password));
         json_get_str(body, "hostname", cfg.hostname, sizeof(cfg.hostname));
+        if (cfg.hostname[0] && !wifi_is_valid_hostname(cfg.hostname)) {
+            static const char err[] = "{\"error\":\"invalid hostname: use letters, digits and '-' only (no dots)\"}";
+            airprint_http_send(h, "400 Bad Request", "application/json", err, sizeof(err) - 1);
+            return true;
+        }
+        if (cfg.hostname[0]) {
+            if (!wifi_is_valid_hostname(cfg.hostname)) {
+                static const char err_host[] =
+                    "{\"error\":\"invalid hostname (use letters, digits, hyphens only; no dots)\"}";
+                airprint_http_send(h, "400 Bad Request", "application/json", err_host, sizeof(err_host) - 1);
+                return true;
+            }
+            for (char *p = cfg.hostname; *p; p++)
+                if (*p >= 'A' && *p <= 'Z')
+                    *p = (char)(*p + ('a' - 'A'));
+        }
         json_get_str(body, "printer_name", cfg.printer_name, sizeof(cfg.printer_name));
         json_get_bool(body, "use_static_ip", &cfg.use_static_ip);
         json_get_str(body, "static_ip", cfg.static_ip, sizeof(cfg.static_ip));

@@ -43,6 +43,8 @@ const char *wifi_effective_hostname(void);
 const char *wifi_effective_printer_name(void);
 
 bool wifi_parse_ipv4(const char *s, uint32_t *out);
+bool wifi_is_valid_hostname(const char *s);
+void wifi_sanitize_hostname(const char *src, char *dst, size_t dst_n);
 void wifi_get_static_cfg(bool *use_static, char *ip, size_t ip_n, char *mask, size_t mask_n, char *gw, size_t gw_n,
                          char *dns, size_t dns_n);
 bool wifi_sta_has_password(void);
