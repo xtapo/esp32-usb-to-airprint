@@ -802,6 +802,7 @@ int main(void)
                 CHECK(pp[5] == (found_pages == 1 ? 0x04 : 0x02), "lbp3300 page %d pp[5] duplex side", found_pages);
                 CHECK(pp[6] == 0x01, "lbp3300 page %d pp[6] cassette 1", found_pages);
                 CHECK(pp[20] == 0x00, "lbp3300 page %d pp[20] flag", found_pages);
+                CHECK(pp[36] == 0x00, "lbp3300 page %d pp[36] expected 0x00, got %02x", found_pages, pp[36]);
                 uint16_t mt = (uint16_t)(pp[22] | (pp[23] << 8));
                 uint16_t ml = (uint16_t)(pp[24] | (pp[25] << 8));
                 uint16_t lb = (uint16_t)(pp[26] | (pp[27] << 8));
@@ -877,6 +878,112 @@ int main(void)
               mc.e1a9_count, found_e1a9);
         CHECK(mc.pages_started == 2 && mc.pages_fired == 2, "lbp3300 2-page counters %u/%u", mc.pages_started,
               mc.pages_fired);
+        free(mc.tx.buf);
+    }
+    {
+        // Full-page A4 (4961x7016) must crop printer margins (120,120) instead of shifting/clipping bottom-right
+        const printer_driver_t *d = printer_driver_find("canon-lbp3300");
+        CHECK(d != NULL, "canon-lbp3300 fullpage crop");
+        mock_capt_t mc = {.bcd_a2a0 = true};
+        printer_io_t io = {.write = mock_capt_write, .flush = mock_capt_flush, .read = mock_capt_read, .ctx = &mc};
+        void *job = d->job_begin(d, &io, 600, 0);
+        CHECK(job != NULL, "lbp3300 crop job_begin");
+        CHECK(d->page_begin(job, 4961, 7016, 1) == 0, "lbp3300 crop page_begin");
+        uint8_t *row_top = malloc(4961);
+        uint8_t *row_bot = malloc(4961);
+        memset(row_top, 0xff, 4961);
+        memset(row_bot, 0xff, 4961);
+        row_top[120] = 0x00;
+        row_bot[4855] = 0x00;
+        for (int y = 0; y < 7016; y++) {
+            const uint8_t *p = (y == 120) ? row_top : (y == 6893) ? row_bot : NULL;
+            CHECK(d->page_line(job, y, p) == 0, "lbp3300 crop page_line");
+        }
+        free(row_top);
+        free(row_bot);
+        CHECK(d->page_end(job) == 0, "lbp3300 crop page_end");
+        CHECK(d->job_end(job) == 0, "lbp3300 crop job_end");
+
+        size_t first_off = 0, first_len = 0, last_off = 0, last_len = 0;
+        int bands = 0;
+        for (size_t k = 0; k + 4 <= mc.tx.len;) {
+            uint16_t cmd = (uint16_t)(mc.tx.buf[k] | (mc.tx.buf[k + 1] << 8));
+            uint16_t plen = (uint16_t)(mc.tx.buf[k + 2] | (mc.tx.buf[k + 3] << 8));
+            if (plen < 4 || k + plen > mc.tx.len)
+                break;
+            if (cmd == 0xC0A0 && plen > 4) {
+                if (bands == 0) {
+                    first_off = k + 4;
+                    first_len = (size_t)(plen - 4);
+                }
+                last_off = k + 4;
+                last_len = (size_t)(plen - 4);
+                bands++;
+            }
+            k += plen;
+        }
+        CHECK(bands == 97 && first_len > 0 && last_len > 0, "lbp3300 crop bands=%d", bands);
+        uint8_t *bdec = malloc(592u * 70u);
+        int eob0 = -1, eob_last = -1;
+        size_t out0 = hiscoa_decode_band(mc.tx.buf + first_off, first_len, 592u, 70u, bdec, &eob0);
+        CHECK(out0 == 592u * 70u && eob0 == 0 && (bdec[0] & 0x80u) != 0,
+              "lbp3300 crop top-left (120,120)->(0,0) miss: out=%zu b0=%02x", out0, bdec[0]);
+        size_t out_l = hiscoa_decode_band(mc.tx.buf + last_off, last_len, 592u, 54u, bdec, &eob_last);
+        uint8_t br_byte = bdec[53u * 592u + (4735u >> 3)];
+        uint8_t br_mask = (uint8_t)(0x80u >> (4735u & 7u));
+        CHECK(out_l == 592u * 54u && eob_last == 1 && (br_byte & br_mask) != 0,
+              "lbp3300 crop bottom-right (4855,6893)->(4735,6773) clipped: out=%zu byte=%02x", out_l, br_byte);
+        free(bdec);
+        free(mc.tx.buf);
+    }
+    {
+        // Oversized 2x A4 raster (9920x14028) must downscale to fit A4 instead of zooming & clipping
+        const printer_driver_t *d = printer_driver_find("canon-lbp3300");
+        CHECK(d != NULL, "canon-lbp3300 downscale");
+        mock_capt_t mc = {.bcd_a2a0 = true};
+        printer_io_t io = {.write = mock_capt_write, .flush = mock_capt_flush, .read = mock_capt_read, .ctx = &mc};
+        void *job = d->job_begin(d, &io, 600, 0);
+        CHECK(job != NULL, "lbp3300 downscale job_begin");
+        CHECK(d->page_begin(job, 9920, 14028, 1) == 0, "lbp3300 downscale page_begin");
+        uint8_t *row = malloc(9920);
+        memset(row, 0xff, 9920);
+        memset(row + 9600, 0x00, 112);
+        for (int y = 0; y < 14028; y++) {
+            const uint8_t *p = (y == 13786 || y == 13787) ? row : NULL;
+            CHECK(d->page_line(job, y, p) == 0, "lbp3300 downscale page_line");
+        }
+        free(row);
+        CHECK(d->page_end(job) == 0, "lbp3300 downscale page_end");
+        CHECK(d->job_end(job) == 0, "lbp3300 downscale job_end");
+
+        size_t last_off = 0, last_len = 0;
+        int bands = 0;
+        for (size_t k = 0; k + 4 <= mc.tx.len;) {
+            uint16_t cmd = (uint16_t)(mc.tx.buf[k] | (mc.tx.buf[k + 1] << 8));
+            uint16_t plen = (uint16_t)(mc.tx.buf[k + 2] | (mc.tx.buf[k + 3] << 8));
+            if (plen < 4 || k + plen > mc.tx.len)
+                break;
+            if (cmd == 0xC0A0 && plen > 4) {
+                last_off = k + 4;
+                last_len = (size_t)(plen - 4);
+                bands++;
+            }
+            k += plen;
+        }
+        CHECK(bands == 97 && last_len > 0, "lbp3300 downscale bands=%d", bands);
+        uint8_t *bdec = malloc(592u * 54u);
+        int eob = -1;
+        size_t out_l = hiscoa_decode_band(mc.tx.buf + last_off, last_len, 592u, 54u, bdec, &eob);
+        bool right_ink = false;
+        for (int x = 4680; x < 4736; x++) {
+            if (bdec[53u * 592u + (unsigned)(x >> 3)] & (0x80u >> (x & 7))) {
+                right_ink = true;
+                break;
+            }
+        }
+        CHECK(out_l == 592u * 54u && eob == 1 && right_ink,
+              "lbp3300 downscale expected eob=1 and ink near x>=4680, y=53 (out=%zu eob=%d)", out_l, eob);
+        free(bdec);
         free(mc.tx.buf);
     }
     {

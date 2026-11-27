@@ -978,7 +978,7 @@ static int pipe_page_begin(void *user, const raster_page_t *pg)
                                .sides = sides,
                                .ctx = p};
         p->dpi = pg->dpi;
-        LOGI("job %d: %s %d dpi, %s%s", p->job->id, d->papers[paper].name, pg->dpi,
+        LOGI("job %d: %s %dx%d %d dpi, %s%s", p->job->id, d->papers[paper].name, pg->width, pg->height, pg->dpi,
              pg->bytes_pp == 3 ? "color" : "gray",
              sides == PRINTER_SIDES_TWO_SIDED_LONG_EDGE    ? ", duplex-long"
              : sides == PRINTER_SIDES_TWO_SIDED_SHORT_EDGE ? ", duplex-short"

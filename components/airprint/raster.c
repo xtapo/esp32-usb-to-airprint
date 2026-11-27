@@ -55,7 +55,7 @@ static uint32_t be32(const uint8_t *p)
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
 
-AP_HOT static int decode_page(reader_t *r, const raster_page_t *pg, const raster_cb_t *cb, void *user)
+AP_HOT static int decode_page(reader_t *r, const raster_page_t *pg, bool is_pwg, const raster_cb_t *cb, void *user)
 {
     const int bpp = pg->bytes_pp;
     const size_t line_bytes = (size_t)pg->width * bpp;
@@ -78,7 +78,7 @@ AP_HOT static int decode_page(reader_t *r, const raster_page_t *pg, const raster
                 ret = RASTER_ERR_IO;
                 break;
             }
-            if (n == 128) {
+            if (!is_pwg && n == 128) {
                 memset(line + x, 0xff, line_bytes - x);
                 x = line_bytes;
             } else if (n < 128) {
@@ -176,7 +176,7 @@ int raster_decode(raster_read_fn read, void *ctx, const raster_cb_t *cb, void *u
                     ret = ph[0] != 8 && ph[0] != 24 ? RASTER_ERR_UNSUPPORTED : RASTER_ERR_FORMAT;
                     break;
                 }
-                if ((ret = decode_page(r, &pg, cb, user)) != 0)
+                if ((ret = decode_page(r, &pg, false, cb, user)) != 0)
                     break;
                 pages++;
                 if (npages && (uint32_t)pages == npages)
@@ -215,7 +215,7 @@ int raster_decode(raster_read_fn read, void *ctx, const raster_cb_t *cb, void *u
                 ret = RASTER_ERR_FORMAT;
                 break;
             }
-            if ((ret = decode_page(r, &pg, cb, user)) != 0)
+            if ((ret = decode_page(r, &pg, true, cb, user)) != 0)
                 break;
             pages++;
         }

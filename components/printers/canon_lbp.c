@@ -87,6 +87,13 @@ typedef struct {
     int src_w;
     int src_h;
     int bytes_pp;
+    int x_off;
+    int y_off;
+    bool scale_to_paper;
+    int fit_w;
+    int fit_h;
+    int pad_x;
+    int pad_y;
 
     uint16_t job_id;
     uint16_t page_num;
@@ -902,7 +909,7 @@ static int capt_send_page_hdr(capt_job_t *j, uint8_t dup, bool new_sheet, bool d
         (uint8_t)(j->height & 0xff), (uint8_t)(j->height >> 8),
         (uint8_t)(j->paper_w & 0xff), (uint8_t)(j->paper_w >> 8),
         (uint8_t)(j->paper_h & 0xff), (uint8_t)(j->paper_h >> 8),
-        0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x00, 0x00, (uint8_t)(v == CAPT_LBP3300 ? 0x00 : 0x01), 0x00, 0x00, 0x00,
     };
     uint8_t hs[8] = {
         4, 12, 0x01, 0x01, 0, (uint8_t)(int8_t)-5, (uint8_t)(384 & 0xff), (uint8_t)(384 >> 8),
@@ -923,8 +930,9 @@ static int capt_send_page_hdr(capt_job_t *j, uint8_t dup, bool new_sheet, bool d
 
     capt_log_hex("d0a0", pp, sizeof(pp));
     capt_send_flush(j, CAPT_SET_PARMS, multi, mp);
-    CAPT_LOGI("page_hdr hw=%u dup=%02x src=%02x %dx%d (%d B/line) err=%d", j->hw_page, dup, src, j->width, j->height,
-              j->line_bytes, j->err);
+    CAPT_LOGI("page_hdr hw=%u dup=%02x src=%02x %dx%d (%d B/line) in=%dx%d off=%d,%d scale=%d err=%d", j->hw_page,
+              dup, src, j->width, j->height, j->line_bytes, j->src_w, j->src_h, j->x_off, j->y_off,
+              j->scale_to_paper, j->err);
     return j->err ? -1 : 0;
 }
 
@@ -1169,6 +1177,28 @@ static int page_begin(void *job, int src_w, int src_h, int bytes_pp)
     j->src_w = src_w;
     j->src_h = src_h;
     j->bytes_pp = bytes_pp;
+    j->scale_to_paper = (src_w > j->paper_w + 32 || src_h > j->paper_h + 32);
+    if (j->scale_to_paper) {
+        if ((int64_t)src_w * j->paper_h >= (int64_t)src_h * j->paper_w) {
+            j->fit_w = j->paper_w;
+            j->fit_h = (int)((int64_t)src_h * j->paper_w / src_w);
+        } else {
+            j->fit_h = j->paper_h;
+            j->fit_w = (int)((int64_t)src_w * j->paper_h / src_h);
+        }
+        if (j->fit_w < 1)
+            j->fit_w = 1;
+        if (j->fit_h < 1)
+            j->fit_h = 1;
+        j->pad_x = (j->paper_w - j->fit_w) / 2;
+        j->pad_y = (j->paper_h - j->fit_h) / 2;
+        j->x_off = 0;
+        j->y_off = 0;
+    } else {
+        j->x_off = (src_w > j->width) ? j->margin_left : 0;
+        j->y_off = (src_h > j->height) ? j->margin_top : 0;
+        j->fit_w = j->fit_h = j->pad_x = j->pad_y = 0;
+    }
     j->band_y = 0;
     j->total_y = 0;
     j->in_page = true;
@@ -1180,8 +1210,9 @@ static int page_begin(void *job, int src_w, int src_h, int bytes_pp)
         j->dup_pending = false;
         j->dup_streamed = false;
         j->dup_len = 0;
-        CAPT_LOGI("page_begin pg=%u (buffered duplex front) %dx%d (%d B/line)", j->page_num, j->width, j->height,
-                  j->line_bytes);
+        CAPT_LOGI("page_begin pg=%u (buffered duplex front) %dx%d (%d B/line) src=%dx%d off=%d,%d scale=%d",
+                  j->page_num, j->width, j->height, j->line_bytes, j->src_w, j->src_h, j->x_off, j->y_off,
+                  j->scale_to_paper);
         return 0;
     }
     if (lbp3300_dup && (j->page_num % 2) == 0) {
@@ -1193,20 +1224,81 @@ static int page_begin(void *job, int src_w, int src_h, int bytes_pp)
     return capt_send_page_hdr(j, 0x00, true, false);
 }
 
-static int page_line(void *job, int y, const uint8_t *px)
+static int capt_emit_line(capt_job_t *j, bool white)
 {
-    capt_job_t *j = job;
-    if (j->err || !j->in_page)
-        return -1;
-    if (y >= j->height)
-        return 0;
-    mono_rgb_to_density(px, j->src_w, j->bytes_pp, j->density, j->width);
-    mono_dither_1bit(j->density, j->width, y, j->band + (size_t)j->band_y * (size_t)j->line_bytes, j->line_bytes);
+    uint8_t *dst = j->band + (size_t)j->band_y * (size_t)j->line_bytes;
+    if (white)
+        memset(dst, 0, (size_t)j->line_bytes);
+    else
+        mono_dither_1bit(j->density, j->width, j->total_y, dst, j->line_bytes);
     j->band_y++;
     j->total_y++;
     if (j->band_y == CAPT_BAND_LINES && j->total_y < j->height) {
         if (flush_band(j, false) < 0)
             return -1;
+    }
+    return 0;
+}
+
+static int page_line(void *job, int y, const uint8_t *px)
+{
+    capt_job_t *j = job;
+    if (j->err || !j->in_page)
+        return -1;
+    if (!j->scale_to_paper) {
+        int dst_y = y - j->y_off;
+        if (dst_y < 0 || dst_y >= j->height)
+            return 0;
+        if (!px)
+            return capt_emit_line(j, true);
+        int avail = j->src_w - j->x_off;
+        mono_rgb_to_density(avail > 0 ? px + (size_t)j->x_off * (size_t)j->bytes_pp : NULL,
+                            avail > 0 ? avail : 0, j->bytes_pp, j->density, j->width);
+        return capt_emit_line(j, false);
+    }
+
+    while (!j->err && j->total_y < j->height) {
+        int py = j->margin_top + j->total_y;
+        if (py < j->pad_y) {
+            if (capt_emit_line(j, true) < 0)
+                return -1;
+            continue;
+        }
+        if (py >= j->pad_y + j->fit_h)
+            break;
+        int need_y = (int)((int64_t)(py - j->pad_y) * j->src_h / j->fit_h);
+        if (need_y > y)
+            break;
+        if (need_y < y) {
+            if (capt_emit_line(j, true) < 0)
+                return -1;
+            continue;
+        }
+        if (!px) {
+            if (capt_emit_line(j, true) < 0)
+                return -1;
+        } else {
+            for (int dst_x = 0; dst_x < j->width; dst_x++) {
+                int px_paper = j->margin_left + dst_x;
+                if (px_paper < j->pad_x || px_paper >= j->pad_x + j->fit_w) {
+                    j->density[dst_x] = 0;
+                } else {
+                    int sx = (int)((int64_t)(px_paper - j->pad_x) * j->src_w / j->fit_w);
+                    if (sx >= j->src_w)
+                        sx = j->src_w - 1;
+                    if (j->bytes_pp == 1) {
+                        j->density[dst_x] = (uint8_t)(255u - px[sx]);
+                    } else {
+                        const uint8_t *p = px + (size_t)sx * (size_t)j->bytes_pp;
+                        uint32_t lum = (77u * p[0] + 150u * p[1] + 29u * p[2]) >> 8;
+                        j->density[dst_x] = (uint8_t)(255u - lum);
+                    }
+                }
+            }
+            if (capt_emit_line(j, false) < 0)
+                return -1;
+        }
+        break;
     }
     return 0;
 }
