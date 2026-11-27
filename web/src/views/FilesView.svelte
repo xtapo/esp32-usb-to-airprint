@@ -25,6 +25,7 @@
   } from '../lib/files.svelte';
   import { addFilesToWork, exportPdf, pageItems } from '../lib/process.svelte';
   import { go, openPrint, openViewer, toast } from '../lib/ui.svelte';
+  import { i18n } from '../lib/i18n.svelte';
 
   let filter = $state<'all' | 'scan' | 'upload' | 'process'>('all');
   let menu = $state('');
@@ -63,9 +64,9 @@
   function dayLabel(d: Date): string {
     const today = new Date();
     const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
-    if (d.toDateString() === today.toDateString()) return 'Today';
-    if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
-    return d.toLocaleDateString(undefined, {
+    if (d.toDateString() === today.toDateString()) return i18n.t.files.today;
+    if (d.toDateString() === yesterday.toDateString()) return i18n.t.files.yesterday;
+    return d.toLocaleDateString(i18n.lang === 'vi' ? 'vi-VN' : undefined, {
       weekday: 'short',
       day: 'numeric',
       month: 'short',
@@ -98,12 +99,12 @@
     try {
       const f = await exportPdf(pageItems(chosen), { paper: 'original', dpi: 200, fallback: 'a4' }, (d, t) => (progress = d / t));
       stopSelecting();
-      toast(`Saved ${f.name} to Files`, 'ok', [
-        { label: 'Print', run: () => openPrint(f) },
-        { label: 'Download', run: () => download(f.blob, f.name) },
+      toast(i18n.t.files.savedToFiles(f.name), 'ok', [
+        { label: i18n.t.files.print, run: () => openPrint(f) },
+        { label: i18n.t.files.download, run: () => download(f.blob, f.name) },
       ]);
     } catch (e) {
-      toast(`Could not make the PDF: ${(e as Error).message}`, 'error');
+      toast(i18n.t.files.couldNotPdf((e as Error).message), 'error');
     } finally {
       busy = false;
     }
@@ -111,11 +112,11 @@
 
   async function bulkDelete() {
     const n = chosen.length;
-    if (!confirm(`Delete ${n} file${n === 1 ? '' : 's'} from this browser?`)) return;
+    if (!confirm(i18n.t.files.confirmDeleteMany(n))) return;
     busy = true;
     try {
       for (const f of chosen) await removeFile(f.id);
-      toast(`Deleted ${n} file${n === 1 ? '' : 's'}`);
+      toast(i18n.t.files.deletedMany(n));
       stopSelecting();
     } finally {
       busy = false;
@@ -127,7 +128,7 @@
     const arr = Array.from(list);
     for (const file of arr) {
       if (!isSupported(file.type, file.name)) {
-        toast(`${file.name}: only PDFs and images`, 'error');
+        toast(i18n.t.files.onlyPdfImg(file.name), 'error');
         continue;
       }
       uploading++;
@@ -154,18 +155,18 @@
   }
 
   async function del(f: StoredFile) {
-    if (!confirm(`Delete "${f.name}" from this browser?`)) return;
+    if (!confirm(i18n.t.files.confirmDeleteOne(f.name))) return;
     await removeFile(f.id);
   }
 
   async function rename(f: StoredFile) {
-    const name = prompt('New name', f.name);
+    const name = prompt(i18n.t.files.newNamePrompt, f.name);
     if (name) await renameFile(f.id, name);
   }
 
   async function toWork(f: StoredFile) {
     const n = await addFilesToWork([f]);
-    toast(`${n} page${n === 1 ? '' : 's'} added to Process`, 'ok', [{ label: 'Open', run: () => go('process') }]);
+    toast(i18n.t.files.addedToProcess(n), 'ok', [{ label: i18n.t.files.open, run: () => go('process') }]);
   }
 
   // the day is in the group's heading
@@ -174,8 +175,8 @@
   }
 
   function kind(f: StoredFile): string {
-    if (f.type === 'application/pdf') return `PDF · ${f.pages} page${f.pages === 1 ? '' : 's'}`;
-    return f.dpi ? `${f.source === 'scan' ? 'Scan' : 'Image'} · ${f.dpi} dpi` : 'Image';
+    if (f.type === 'application/pdf') return i18n.t.files.pdfPages(f.pages ?? 1);
+    return f.dpi ? `${f.source === 'scan' ? i18n.t.files.scanLabel : i18n.t.files.imageLabel} · ${f.dpi} dpi` : i18n.t.files.imageLabel;
   }
 </script>
 
@@ -185,7 +186,7 @@
   class="drop"
   class:dragging
   role="region"
-  aria-label="Files"
+  aria-label={i18n.t.files.title}
   ondragover={(e) => {
     e.preventDefault();
     dragging = true;
@@ -195,22 +196,22 @@
 >
   <div class="head row wrap">
     <div class="grow">
-      <h1>Files</h1>
-      <p class="muted small">Kept in this browser only · {files.list.length} files · {formatSize(total)}</p>
+      <h1>{i18n.t.files.title}</h1>
+      <p class="muted small">{i18n.t.files.subtitle(files.list.length, formatSize(total))}</p>
     </div>
     {#if files.list.length}
       <button class="btn" class:on={selecting} onclick={() => (selecting ? stopSelecting() : (selecting = true))}>
-        {#if selecting}<X size={17} /> Done{:else}<SquareCheck size={17} /> Select{/if}
+        {#if selecting}<X size={17} /> {i18n.t.files.done}{:else}<SquareCheck size={17} /> {i18n.t.files.select}{/if}
       </button>
     {/if}
     <button class="btn primary" onclick={() => input.click()}>
-      {#if uploading}<LoaderCircle size={17} class="spin" />{:else}<Upload size={17} />{/if} Upload
+      {#if uploading}<LoaderCircle size={17} class="spin" />{:else}<Upload size={17} />{/if} {i18n.t.files.upload}
     </button>
     <input bind:this={input} type="file" accept="application/pdf,image/*" multiple hidden onchange={onPick} />
   </div>
 
   <div class="seg filters">
-    {#each [['all', 'All'], ['scan', 'Scans'], ['upload', 'Uploads'], ['process', 'Made here']] as [k, label]}
+    {#each [['all', i18n.t.files.filters.all], ['scan', i18n.t.files.filters.scan], ['upload', i18n.t.files.filters.upload], ['process', i18n.t.files.filters.process]] as [k, label]}
       <button class:on={filter === k} onclick={() => (filter = k as typeof filter)}>{label}</button>
     {/each}
   </div>
@@ -221,10 +222,10 @@
     <div class="card empty">
       <Inbox size={40} strokeWidth={1.4} />
       <div>
-        <b>No files yet</b>
-        <p class="small">Upload PDFs or pictures (or drop them here), or scan a page: it shows up here.</p>
+        <b>{i18n.t.files.noFiles}</b>
+        <p class="small">{i18n.t.files.emptyDesc}</p>
       </div>
-      <button class="btn" onclick={() => input.click()}><Upload size={17} /> Upload</button>
+      <button class="btn" onclick={() => input.click()}><Upload size={17} /> {i18n.t.files.upload}</button>
     </div>
   {:else}
     {#each groups as g (g.key)}
@@ -272,17 +273,17 @@
                 >
                 {#if menu === f.id}
                   <div class="menu card" role="menu">
-                    <button onclick={() => toWork(f)}><Layers size={16} /> Add to Process</button>
-                    <button onclick={() => rename(f)}><Pencil size={16} /> Rename</button>
-                    <button class="danger" onclick={() => del(f)}><Trash2 size={16} /> Delete</button>
+                    <button onclick={() => toWork(f)}><Layers size={16} /> {i18n.t.files.addToProcess}</button>
+                    <button onclick={() => rename(f)}><Pencil size={16} /> {i18n.t.files.rename}</button>
+                    <button class="danger" onclick={() => del(f)}><Trash2 size={16} /> {i18n.t.files.del}</button>
                   </div>
                 {/if}
               </div>
             </div>
             {#if !selecting}
             <div class="row btns">
-              <button class="btn primary grow" onclick={() => openPrint(f)}><Printer size={16} /> Print</button>
-              <button class="btn" onclick={() => download(f.blob, f.name)} aria-label="Download"><Download size={16} /></button>
+              <button class="btn primary grow" onclick={() => openPrint(f)}><Printer size={16} /> {i18n.t.files.print}</button>
+              <button class="btn" onclick={() => download(f.blob, f.name)} aria-label={i18n.t.files.download}><Download size={16} /></button>
             </div>
             {/if}
           </div>
@@ -293,23 +294,23 @@
     {/each}
   {/if}
   {#if dragging}
-    <div class="overlay"><Upload size={36} /> Drop to add</div>
+    <div class="overlay"><Upload size={36} /> {i18n.t.files.dropToAdd}</div>
   {/if}
   {#if selecting}
     <div class="bulk card">
       <div class="grow">
-        <b>{chosen.length} selected</b>
+        <b>{i18n.t.files.selectedCount(chosen.length)}</b>
         <div class="muted small">
-          {chosen.length ? 'The PDF keeps the order you picked them in.' : 'Tap files to pick them.'}
+          {chosen.length ? i18n.t.files.selectedHint : i18n.t.files.tapToPick}
         </div>
         {#if busy && progress}<div class="bar"><div style:width={`${progress * 100}%`}></div></div>{/if}
       </div>
       <button class="btn ghost" onclick={selectAll} disabled={busy}>
-        {selected.length && shown.every((f) => selected.includes(f.id)) ? 'None' : 'All'}
+        {selected.length && shown.every((f) => selected.includes(f.id)) ? i18n.t.files.none : i18n.t.files.all}
       </button>
-      <button class="btn danger" onclick={bulkDelete} disabled={!chosen.length || busy}><Trash2 size={17} /> Delete</button>
+      <button class="btn danger" onclick={bulkDelete} disabled={!chosen.length || busy}><Trash2 size={17} /> {i18n.t.files.del}</button>
       <button class="btn primary" onclick={bulkPdf} disabled={!chosen.length || busy}>
-        {#if busy}<LoaderCircle size={17} class="spin" />{:else}<FileDown size={17} />{/if} Save as PDF
+        {#if busy}<LoaderCircle size={17} class="spin" />{:else}<FileDown size={17} />{/if} {i18n.t.files.savePdf}
       </button>
     </div>
   {/if}

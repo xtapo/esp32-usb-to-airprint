@@ -19,6 +19,7 @@
   } from '../lib/scan.svelte';
   import { go, openPrint, openViewer, toast } from '../lib/ui.svelte';
   import { defaultPaper } from '../lib/layout';
+  import { i18n } from '../lib/i18n.svelte';
 
   const saved = (() => {
     try {
@@ -48,14 +49,15 @@
 
   const statusText = $derived.by(() => {
     if (!st) return '';
+    const t = i18n.t.scanner;
     if (scanning) {
-      const who = st.source && st.source !== 'web' && st.source !== 'stream' ? ` · started from ${sourceLabel(st.source)}` : '';
-      if (!st.lines) return `Warming up and calibrating…${who}`;
-      return `Scanning ${Math.round(progress * 100)}% · ${formatSize(scanUi.received || st.bytes)}${who}`;
+      const who = st.source && st.source !== 'web' && st.source !== 'stream' ? t.startedFrom(sourceLabel(st.source)) : '';
+      if (!st.lines) return t.warmingUpFull(who);
+      return t.scanningLine(Math.round(progress * 100), formatSize(scanUi.received || st.bytes), who);
     }
-    if (st.state === 'failed') return `Scan failed: ${st.error}`;
-    if (st.state === 'canceled') return 'Canceled';
-    if (st.state === 'done') return `Done: ${st.width} × ${st.height} pixels at ${st.dpi} dpi in ${Math.round(st.elapsed)} s`;
+    if (st.state === 'failed') return t.scanFailed(st.error);
+    if (st.state === 'canceled') return t.canceled;
+    if (st.state === 'done') return t.doneLine(st.width, st.height, st.dpi, Math.round(st.elapsed));
     return '';
   });
 
@@ -79,51 +81,50 @@
 
 <div class="layout">
   <section class="card card-pad settings">
-    <h2>Scan</h2>
+    <h2>{i18n.t.scanner.title}</h2>
     <div class="field">
-      <span class="label">Original</span>
+      <span class="label">{i18n.t.scanner.original}</span>
       <div class="seg">
-        <button class:on={paper === 'a4'} onclick={() => (paper = 'a4')} disabled={scanning}>A4</button>
-        <button class:on={paper === 'letter'} onclick={() => (paper = 'letter')} disabled={scanning}>Letter</button>
-        <button class:on={paper === 'card'} onclick={() => (paper = 'card')} disabled={scanning}>ID card</button>
+        <button class:on={paper === 'a4'} onclick={() => (paper = 'a4')} disabled={scanning}>{i18n.t.scanner.a4}</button>
+        <button class:on={paper === 'letter'} onclick={() => (paper = 'letter')} disabled={scanning}>{i18n.t.scanner.letter}</button>
+        <button class:on={paper === 'card'} onclick={() => (paper = 'card')} disabled={scanning}>{i18n.t.scanner.idCard}</button>
       </div>
       {#if paper === 'card'}
-        <p class="muted small">Put the card in the corner of the glass, by the arrow. Only that corner is scanned, which is quick.</p>
+        <p class="muted small">{i18n.t.scanner.cardHint}</p>
       {/if}
     </div>
     <div class="field">
-      <span class="label">Resolution</span>
+      <span class="label">{i18n.t.scanner.resolution}</span>
       <div class="seg">
         {#each [150, 300, 600] as d}
           <button class:on={dpi === d} onclick={() => (dpi = d)} disabled={scanning}>{d} dpi</button>
         {/each}
       </div>
       <p class="muted small">
-        {#if dpi === 150}Quick, for reading on screen.{:else if dpi === 300}Documents and copies.{:else}Photos. Slow, and only this browser receives it: keep this page open.{/if}
+        {#if dpi === 150}{i18n.t.scanner.dpi150}{:else if dpi === 300}{i18n.t.scanner.dpi300}{:else}{i18n.t.scanner.dpi600}{/if}
       </p>
     </div>
     <div class="go">
       {#if scanning}
-        <button class="btn big danger" onclick={cancelScan}><CircleStop size={18} /> Cancel</button>
+        <button class="btn big danger" onclick={cancelScan}><CircleStop size={18} /> {i18n.t.scanner.cancelBtn}</button>
       {:else}
         <button
           class="btn primary big"
           onclick={scan}
           disabled={starting || !device.online || !st?.scanner || printerBusy}
         >
-          {#if starting}<LoaderCircle size={18} class="spin" />{:else}<ScanLine size={18} />{/if} Scan
+          {#if starting}<LoaderCircle size={18} class="spin" />{:else}<ScanLine size={18} />{/if} {i18n.t.scanner.scanBtn}
         </button>
       {/if}
     </div>
     {#if device.loaded && !st?.scanner}
-      <p class="err small">No scanner: is the printer on and connected?</p>
+      <p class="err small">{i18n.t.scanner.noScanner}</p>
     {:else if printerBusy}
-      <p class="muted small">The printer is printing; scan when it is done.</p>
+      <p class="muted small">{i18n.t.scanner.printerBusy}</p>
     {/if}
     {#if st?.button}
       <p class="muted small hint">
-        The button on the printer box scans too ({st.button.paper === 'letter' ? 'Letter' : 'A4'}, {st.button.dpi} dpi).
-        Every open page receives the scan.
+        {i18n.t.scanner.buttonHint(st.button.paper === 'letter' ? i18n.t.scanner.letter : i18n.t.scanner.a4, st.button.dpi)}
       </p>
     {/if}
   </section>
@@ -135,7 +136,7 @@
       {:else}
         <div class="placeholder muted">
           <ScanLine size={36} strokeWidth={1.4} />
-          <span>{scanning ? 'Warming up…' : 'The page appears here while it is scanned'}</span>
+          <span>{scanning ? i18n.t.scanner.warmingUpShort : i18n.t.scanner.placeholder}</span>
         </div>
       {/if}
       {#if scanning}
@@ -151,15 +152,15 @@
       {#if scanUi.lastFile && !scanning}
         {@const f = scanUi.lastFile}
         <div class="row wrap actions">
-          <button class="btn primary" onclick={() => openPrint(f)}><Printer size={17} /> Print a copy</button>
+          <button class="btn primary" onclick={() => openPrint(f)}><Printer size={17} /> {i18n.t.scanner.printCopy}</button>
           <button
             class="btn"
             onclick={async () => {
               await addFilesToWork([f]);
-              toast('Added to Process', 'ok', [{ label: 'Open', run: () => go('process') }]);
-            }}><Layers size={17} /> Process</button
+              toast(i18n.t.scanner.addedToProcess, 'ok', [{ label: i18n.t.scanner.open, run: () => go('process') }]);
+            }}><Layers size={17} /> {i18n.t.scanner.processBtn}</button
           >
-          <button class="btn ghost" onclick={() => download(f.blob, f.name)}><Download size={17} /> Download</button>
+          <button class="btn ghost" onclick={() => download(f.blob, f.name)}><Download size={17} /> {i18n.t.scanner.download}</button>
         </div>
       {/if}
     </div>
@@ -167,7 +168,7 @@
 
   {#if recent.length}
     <section class="recent">
-      <div class="row"><h2 class="grow">Recent scans</h2><a href="#/files" class="small">All files</a></div>
+      <div class="row"><h2 class="grow">{i18n.t.scanner.recentScans}</h2><a href="#/files" class="small">{i18n.t.scanner.allFiles}</a></div>
       <div class="strip">
         {#each recent as f (f.id)}
           <button class="thumb" onclick={() => openViewer(f)} title={f.name}>

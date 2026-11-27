@@ -78,6 +78,10 @@ int airprint_http_read_body(airprint_http_t *h, void *buf, size_t max);
 const char *airprint_http_host(airprint_http_t *h);
 // The request's If-None-Match header ("" if none).
 const char *airprint_http_if_none_match(airprint_http_t *h);
+// Content-Length of the request body (-1 if unknown or chunked).
+int64_t airprint_http_content_length(airprint_http_t *h);
+// The request's X-Admin-Password header ("" if none).
+const char *airprint_http_admin_password(airprint_http_t *h);
 // A streamed 200 response of unknown length (chunked); extra_headers are
 // full "Name: value\r\n" lines or NULL. Calls return < 0 once the client is gone.
 int airprint_http_stream_begin(airprint_http_t *h, const char *type, const char *extra_headers);

@@ -23,6 +23,7 @@
   import type { Sides } from '../lib/urf';
   import { whiteCanvas, type Source } from '../lib/source';
   import { toast } from '../lib/ui.svelte';
+  import { i18n } from '../lib/i18n.svelte';
 
   let { file, onclose }: { file: StoredFile; onclose: () => void } = $props();
 
@@ -75,10 +76,11 @@
     dpi === 300 && !supports300 && supports600 ? 600 : dpi === 600 && !supports600 && supports300 ? 300 : dpi,
   );
   const blocker = $derived.by(() => {
-    if (!device.online) return 'The printer box is not reachable.';
-    if (!p?.connected) return 'No printer is connected to the printer box.';
-    if (p.state === 'processing') return 'The printer is busy with another job.';
-    if (device.scan?.state === 'scanning') return 'The printer is scanning.';
+    const t = i18n.t.printDialog;
+    if (!device.online) return t.blockerOffline;
+    if (!p?.connected) return t.blockerNoPrinter;
+    if (p.state === 'processing') return t.blockerBusy;
+    if (device.scan?.state === 'scanning') return t.blockerScan;
     return '';
   });
 
@@ -144,13 +146,13 @@
         o,
         (done, total) => {
           frac = done / total;
-          detail = `Preparing page ${Math.min(total, Math.floor(done) + 1)} of ${total}`;
+          detail = i18n.t.printDialog.preparingPage(Math.min(total, Math.floor(done) + 1), total);
         },
         signal,
       );
       phase = 'send';
       frac = 0;
-      detail = 'Sending to the printer';
+      detail = i18n.t.printDialog.sending;
       await sendJob(
         doc,
         name,
@@ -158,19 +160,19 @@
           frac = f;
           if (f >= 1) {
             phase = 'finish';
-            detail = 'Finishing the last page';
+            detail = i18n.t.printDialog.finishing;
           }
         },
         signal,
         effectiveSides,
       );
-      toast(`Printed ${sheets} page${sheets === 1 ? '' : 's'} of ${name}`, 'ok');
+      toast(i18n.t.printDialog.printedToast(sheets, name), 'ok');
       if (!closed) onclose();
     } catch (e) {
       if ((e as Error).name === 'AbortError') {
-        toast('Print canceled');
+        toast(i18n.t.printDialog.canceledToast);
       } else {
-        toast(`Print failed: ${(e as Error).message}`, 'error', [], 9000);
+        toast(i18n.t.printDialog.failedToast((e as Error).message), 'error', [], 9000);
       }
       phase = 'setup';
     } finally {
@@ -195,7 +197,7 @@
   });
 </script>
 
-<Modal title="Print {file.name}" onclose={close} wide>
+<Modal title={i18n.t.printDialog.title(file.name)} onclose={close} wide>
   <div class="layout">
     <div class="left">
       <div class="preview" bind:this={previewEl} style:aspect-ratio={`${PAPERS[paper].w} / ${PAPERS[paper].h}`}>
@@ -205,12 +207,12 @@
       </div>
       {#if count > 1}
         <div class="pager row">
-          <button class="icon-btn" onclick={() => pageIdx--} disabled={pageIdx === 0} aria-label="Previous page"><ChevronLeft /></button>
-          <span class="small muted">Page {pageIdx + 1} of {count}</span>
-          <button class="icon-btn" onclick={() => pageIdx++} disabled={pageIdx >= count - 1} aria-label="Next page"><ChevronRight /></button>
+          <button class="icon-btn" onclick={() => pageIdx--} disabled={pageIdx === 0} aria-label={i18n.t.printDialog.previousPage}><ChevronLeft /></button>
+          <span class="small muted">{i18n.t.printDialog.pageOf(pageIdx + 1, count)}</span>
+          <button class="icon-btn" onclick={() => pageIdx++} disabled={pageIdx >= count - 1} aria-label={i18n.t.printDialog.nextPage}><ChevronRight /></button>
         </div>
       {/if}
-      <p class="small muted center">The dashed line shows what the printer can reach.</p>
+      <p class="small muted center">{i18n.t.printDialog.marginsHint}</p>
     </div>
 
     <div class="opts">
@@ -220,85 +222,85 @@
           <div class="bar"><div style:width={`${Math.max(2, frac * 100)}%`}></div></div>
           <p class="small muted">
             {#if phase === 'render'}
-              Pages are prepared here in the browser, then sent.
+              {i18n.t.printDialog.renderHint}
             {:else}
-              The printer prints while it receives. You can close this window; progress shows on the Printer page.
+              {i18n.t.printDialog.sendHint}
             {/if}
           </p>
-          <button class="btn danger" onclick={() => abort?.abort()}>Cancel</button>
+          <button class="btn danger" onclick={() => abort?.abort()}>{i18n.t.printDialog.cancel}</button>
         </div>
       {/if}
       <fieldset disabled={phase !== 'setup'}>
         <div class="field">
-          <span class="label">Copies</span>
+          <span class="label">{i18n.t.printDialog.copies}</span>
           <div class="stepper">
             <button class="icon-btn" onclick={() => (copies = Math.max(1, copies - 1))} aria-label="Fewer"><Minus size={16} /></button>
-            <input class="input" type="number" min="1" max="99" bind:value={copies} aria-label="Copies" />
+            <input class="input" type="number" min="1" max="99" bind:value={copies} aria-label={i18n.t.printDialog.copies} />
             <button class="icon-btn" onclick={() => (copies = Math.min(99, copies + 1))} aria-label="More"><Plus size={16} /></button>
           </div>
         </div>
         {#if count > 1}
           <div class="field">
-            <span class="label">Pages</span>
-            <input class="input" placeholder="All {count} pages, or e.g. 1-3, 5" bind:value={range} />
-            {#if !selected}<span class="err small">Pages 1 to {count}, e.g. "1-3, 5"</span>{/if}
+            <span class="label">{i18n.t.printDialog.pages}</span>
+            <input class="input" placeholder={i18n.t.printDialog.allPagesPlaceholder(count)} bind:value={range} />
+            {#if !selected}<span class="err small">{i18n.t.printDialog.pagesRangeErr(count)}</span>{/if}
           </div>
         {/if}
         <div class="field">
-          <span class="label">Paper</span>
+          <span class="label">{i18n.t.printDialog.paper}</span>
           <div class="seg">
             <button class:on={paper === 'a4'} onclick={() => (paper = 'a4')}>A4</button>
             <button class:on={paper === 'letter'} onclick={() => (paper = 'letter')}>Letter</button>
           </div>
         </div>
         <div class="field">
-          <span class="label">Size</span>
+          <span class="label">{i18n.t.printDialog.size}</span>
           <div class="seg">
-            <button class:on={fit === 'fit'} onclick={() => (fit = 'fit')}>Fit to page</button>
-            <button class:on={fit === 'fill'} onclick={() => (fit = 'fill')}>Fill page</button>
-            <button class:on={fit === 'actual'} onclick={() => (fit = 'actual')}>Actual size</button>
+            <button class:on={fit === 'fit'} onclick={() => (fit = 'fit')}>{i18n.t.printDialog.fit}</button>
+            <button class:on={fit === 'fill'} onclick={() => (fit = 'fill')}>{i18n.t.printDialog.fill}</button>
+            <button class:on={fit === 'actual'} onclick={() => (fit = 'actual')}>{i18n.t.printDialog.actual}</button>
           </div>
         </div>
         <div class="field">
-          <span class="label">Orientation</span>
+          <span class="label">{i18n.t.printDialog.orientation}</span>
           <div class="seg">
-            <button class:on={orientation === 'auto'} onclick={() => (orientation = 'auto')}>Auto</button>
-            <button class:on={orientation === 'portrait'} onclick={() => (orientation = 'portrait')}>Portrait</button>
-            <button class:on={orientation === 'landscape'} onclick={() => (orientation = 'landscape')}>Landscape</button>
+            <button class:on={orientation === 'auto'} onclick={() => (orientation = 'auto')}>{i18n.t.printDialog.auto}</button>
+            <button class:on={orientation === 'portrait'} onclick={() => (orientation = 'portrait')}>{i18n.t.printDialog.portrait}</button>
+            <button class:on={orientation === 'landscape'} onclick={() => (orientation = 'landscape')}>{i18n.t.printDialog.landscape}</button>
           </div>
         </div>
         <div class="field">
-          <span class="label">Color</span>
+          <span class="label">{i18n.t.printDialog.color}</span>
           {#if supportsColor}
             <div class="seg">
-              <button class:on={!gray} onclick={() => (gray = false)}>Color</button>
-              <button class:on={gray} onclick={() => (gray = true)}>Black &amp; white</button>
+              <button class:on={!gray} onclick={() => (gray = false)}>{i18n.t.printDialog.colorBtn}</button>
+              <button class:on={gray} onclick={() => (gray = true)}>{i18n.t.printDialog.bwBtn}</button>
             </div>
           {:else}
-            <span class="small muted">Monochrome printer (black &amp; white only).</span>
+            <span class="small muted">{i18n.t.printDialog.monoOnly}</span>
           {/if}
         </div>
         <div class="field">
-          <span class="label">Quality</span>
+          <span class="label">{i18n.t.printDialog.quality}</span>
           <div class="seg">
             {#if supports600}
-              <button class:on={effectiveDpi === 600} onclick={() => (dpi = 600)}>Standard · 600 dpi</button>
+              <button class:on={effectiveDpi === 600} onclick={() => (dpi = 600)}>{i18n.t.printDialog.dpi600}</button>
             {/if}
             {#if supports300}
-              <button class:on={effectiveDpi === 300} onclick={() => (dpi = 300)}>Fast · 300 dpi</button>
+              <button class:on={effectiveDpi === 300} onclick={() => (dpi = 300)}>{i18n.t.printDialog.dpi300}</button>
             {/if}
           </div>
           {#if supports300 && supports600}
-            <span class="small muted">300 dpi sends a quarter of the data: quicker for photos.</span>
+            <span class="small muted">{i18n.t.printDialog.dpiHint}</span>
           {/if}
         </div>
         {#if supportsDuplex}
           <div class="field">
-            <span class="label">Sides</span>
+            <span class="label">{i18n.t.printDialog.sides}</span>
             <div class="seg">
-              <button class:on={sides === 'one-sided'} onclick={() => (sides = 'one-sided')}>1-sided</button>
-              <button class:on={sides === 'two-sided-long-edge'} onclick={() => (sides = 'two-sided-long-edge')}>2-sided (long)</button>
-              <button class:on={sides === 'two-sided-short-edge'} onclick={() => (sides = 'two-sided-short-edge')}>2-sided (short)</button>
+              <button class:on={sides === 'one-sided'} onclick={() => (sides = 'one-sided')}>{i18n.t.printDialog.oneSided}</button>
+              <button class:on={sides === 'two-sided-long-edge'} onclick={() => (sides = 'two-sided-long-edge')}>{i18n.t.printDialog.twoLong}</button>
+              <button class:on={sides === 'two-sided-short-edge'} onclick={() => (sides = 'two-sided-short-edge')}>{i18n.t.printDialog.twoShort}</button>
             </div>
           </div>
         {/if}
@@ -314,9 +316,9 @@
         <span class="muted">{p?.name} · {inkSummary(p)}</span>
       {/if}
     </div>
-    <button class="btn" onclick={close}>{phase === 'setup' ? 'Cancel' : 'Hide'}</button>
+    <button class="btn" onclick={close}>{phase === 'setup' ? i18n.t.printDialog.cancel : i18n.t.printDialog.hide}</button>
     <button class="btn primary" onclick={print} disabled={!src || !selected?.length || !!blocker || phase !== 'setup'}>
-      <Printer size={17} /> Print {selected && selected.length * copies > 1 ? `${selected.length * copies} pages` : ''}
+      <Printer size={17} /> {i18n.t.printDialog.printBtn} {selected && selected.length * copies > 1 ? i18n.t.printDialog.pagesSuffix(selected.length * copies) : ''}
     </button>
   {/snippet}
 </Modal>

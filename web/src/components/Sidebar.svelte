@@ -9,53 +9,56 @@
   import { files } from '../lib/files.svelte';
   import { work } from '../lib/process.svelte';
   import { scanProgress } from '../lib/scan.svelte';
+  import { i18n } from '../lib/i18n.svelte';
 
   let { current, home }: { current: string; home: boolean } = $props();
 
   const printerLine = $derived.by(() => {
+    const t = i18n.t.nav;
     const p = device.printer;
-    if (!device.loaded) return 'Connecting…';
-    if (!p) return 'Unavailable';
-    if (!p.connected) return 'Printer not connected';
+    if (!device.loaded) return t.connecting;
+    if (!p) return t.unavailable;
+    if (!p.connected) return t.noPrinter;
     const job = p.jobs.find((j) => j.id === p.active);
-    if (job && job.state === 'processing') return `Printing · page ${job.pages + 1}`;
-    if (device.scan?.state === 'scanning') return 'Busy scanning';
+    if (job && job.state === 'processing') return t.printingPage(job.pages + 1);
+    if (device.scan?.state === 'scanning') return t.busyScanning;
     const low = p.supplies.find((s) => s.level >= 0 && s.level <= 10);
     if (p.reasons.some((r) => r.endsWith('-error'))) return p.message;
-    return low ? `Ready · ${low.name} ink low` : 'Ready';
+    return low ? t.readyLowInk(low.name) : t.ready;
   });
 
   const scanLine = $derived.by(() => {
+    const t = i18n.t.nav;
     const s = device.scan;
-    if (!device.loaded) return 'Connecting…';
-    if (!s || !s.scanner) return 'No scanner';
-    if (s.state === 'scanning') return s.lines ? `Scanning · ${Math.round(scanProgress(s) * 100)}%` : 'Warming up…';
-    return 'Ready';
+    if (!device.loaded) return t.connecting;
+    if (!s || !s.scanner) return t.noScanner;
+    if (s.state === 'scanning') return s.lines ? t.scanningPct(Math.round(scanProgress(s) * 100)) : t.warmingUp;
+    return t.ready;
   });
 
   const items = $derived([
-    { id: 'printer', label: 'Printer', icon: Printer, line: printerLine, desc: 'Status, ink and print jobs' },
-    { id: 'scanner', label: 'Scanner', icon: ScanLine, line: scanLine, desc: 'Scan documents and photos' },
+    { id: 'printer', label: i18n.t.routes.printer, icon: Printer, line: printerLine, desc: i18n.t.nav.printerDesc },
+    { id: 'scanner', label: i18n.t.routes.scanner, icon: ScanLine, line: scanLine, desc: i18n.t.nav.scannerDesc },
     {
       id: 'files',
-      label: 'Files',
+      label: i18n.t.routes.files,
       icon: FolderOpen,
-      line: files.loaded ? `${files.list.length} file${files.list.length === 1 ? '' : 's'}` : '…',
-      desc: 'Scans and uploads: print or download',
+      line: files.loaded ? i18n.t.nav.fileCount(files.list.length) : '…',
+      desc: i18n.t.nav.filesDesc,
     },
     {
       id: 'process',
-      label: 'Process',
+      label: i18n.t.routes.process,
       icon: Layers,
-      line: work.items.length ? `${work.items.length} page${work.items.length === 1 ? '' : 's'}` : 'Empty',
-      desc: 'Rotate, crop, ID card copies, PDF',
+      line: work.items.length ? i18n.t.nav.pageCount(work.items.length) : i18n.t.nav.empty,
+      desc: i18n.t.nav.processDesc,
     },
     {
       id: 'wifi',
-      label: 'WiFi',
+      label: i18n.t.routes.wifi,
       icon: Wifi,
-      line: device.online ? 'Network & AP' : 'Setup',
-      desc: 'Connect WiFi and AirPrint settings',
+      line: device.online ? i18n.t.nav.wifiLineOnline : i18n.t.nav.wifiLineSetup,
+      desc: i18n.t.nav.wifiDesc,
     },
   ]);
 
@@ -72,13 +75,13 @@
   <div class="brand">
     <div class="logo"><Printer size={22} /></div>
     <div class="grow">
-      <div class="name ellipsis">{device.printer?.name || 'Printer'}</div>
+      <div class="name ellipsis">{device.printer?.name || i18n.t.routes.printer}</div>
       <div class="model ellipsis">{device.printer?.model || ''}</div>
     </div>
   </div>
 
   {#if home}
-    <p class="hello">What would you like to do?</p>
+    <p class="hello">{i18n.t.nav.hello}</p>
   {/if}
 
   <ul>
@@ -101,8 +104,22 @@
   <div class="foot">
     <span class="pill {tone}">
       <span class="dot"></span>
-      {device.online ? (tone === 'busy' ? 'Working' : tone === 'warn' ? 'No printer' : 'Online') : 'Reconnecting…'}
+      {device.online
+        ? tone === 'busy'
+          ? i18n.t.nav.working
+          : tone === 'warn'
+            ? i18n.t.nav.noPrinterShort
+            : i18n.t.nav.online
+        : i18n.t.nav.reconnecting}
     </span>
+    <button
+      type="button"
+      class="btn lang-btn"
+      onclick={() => i18n.toggle()}
+      title="Switch language (VI / EN)"
+    >
+      {i18n.lang.toUpperCase()}
+    </button>
   </div>
 </nav>
 
@@ -187,6 +204,16 @@
   .foot {
     margin-top: auto;
     padding: 12px 6px 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .lang-btn {
+    padding: 4px 10px;
+    min-height: 28px;
+    font-size: 0.75rem;
+    font-weight: 700;
   }
 
   /* phones: the menu is the first screen */

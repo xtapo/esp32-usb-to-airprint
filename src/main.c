@@ -38,6 +38,8 @@
 static const char *TAG = "main";
 
 #define LONG_PRESS_MS 2000
+#define WIFI_RESET_HOLD_MS 5000
+#define BOOT_WIFI_RESET_HOLD_MS 8000
 #define DOUBLE_PRESS_MS 400     // a second press within this is a double press
 #define ERROR_SHOW_MS 3000
 
@@ -131,11 +133,20 @@ static void on_double_press(void)
     }
 }
 
-// The second button (GPIO5): starts the WiFi setup SoftAP portal on demand.
+// The second button (GPIO5): short press starts setup portal; hold 5 s resets WiFi & passwords.
 static void on_user_button(void)
 {
     ESP_LOGI(TAG, "user button (GPIO%d) pressed: enabling WiFi setup portal", CONFIG_USER_BUTTON_GPIO);
     wifi_start_portal();
+}
+
+static void do_wifi_factory_reset(void)
+{
+    ESP_LOGW(TAG, "hardware button held: clearing WiFi and security config, rebooting into setup AP");
+    status_led_set(LED_ERROR);
+    wifi_clear_config();
+    vTaskDelay(pdMS_TO_TICKS(800));
+    esp_restart();
 }
 
 static void input_pullup(int pin)
@@ -180,21 +191,26 @@ static void button_task(void *arg)
     int same = 0;
     TickType_t pressed_at = 0, released_at = 0;
     bool long_fired = false;
+    bool boot_reset_fired = false;
     bool pending = false;       // a press waiting to see whether a second one follows
     bool waking = false;        // this press turned the screen on: it does nothing else
     // the user button
     bool user_down = false;
     int user_same = 0;
+    TickType_t user_pressed_at = 0;
+    bool user_long_fired = false;
+    bool user_waking = false;
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10));
         if (debounce(is_down(CONFIG_PRINT_BUTTON_GPIO) || is_down(CONFIG_PRINT_BUTTON2_GPIO), &down, &same)) {
             if (down) {
                 pressed_at = xTaskGetTickCount();
                 long_fired = false;
+                boot_reset_fired = false;
                 waking = oled_wake();
                 if (waking)
                     pending = false;
-            } else if (!long_fired && !waking) {
+            } else if (!long_fired && !boot_reset_fired && !waking) {
                 if (pending) {
                     pending = false;
                     on_double_press();
@@ -216,9 +232,27 @@ static void button_task(void *arg)
                 scan_service_cancel();
             }
         }
+        if (down && !boot_reset_fired && !waking && !s_busy && !s_airprint_busy &&
+            xTaskGetTickCount() - pressed_at >= pdMS_TO_TICKS(BOOT_WIFI_RESET_HOLD_MS)) {
+            boot_reset_fired = true;
+            pending = false;
+            do_wifi_factory_reset();
+        }
 
-        if (debounce(is_down(CONFIG_USER_BUTTON_GPIO), &user_down, &user_same) && user_down && !oled_wake())
-            on_user_button();
+        if (debounce(is_down(CONFIG_USER_BUTTON_GPIO), &user_down, &user_same)) {
+            if (user_down) {
+                user_pressed_at = xTaskGetTickCount();
+                user_long_fired = false;
+                user_waking = oled_wake();
+            } else if (!user_long_fired && !user_waking) {
+                on_user_button();
+            }
+        }
+        if (user_down && !user_long_fired && !user_waking &&
+            xTaskGetTickCount() - user_pressed_at >= pdMS_TO_TICKS(WIFI_RESET_HOLD_MS)) {
+            user_long_fired = true;
+            do_wifi_factory_reset();
+        }
     }
 }
 

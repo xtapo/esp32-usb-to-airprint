@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_netif_ip_addr.h"
 #include "esp_netif_sntp.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -33,20 +34,130 @@ static char s_ssid[33];
 static char s_password[65];
 static char s_hostname[33];
 static char s_printer_name[65];
-static char s_ap_ssid[24];
+static char s_ap_ssid[33];
+static char s_custom_ap_ssid[33];
+static char s_ap_pass[65];
+static char s_admin_pass[65];
+static uint8_t s_sta_mac[6];
+static bool s_use_static_ip;
+static char s_static_ip[16];
+static char s_netmask[16];
+static char s_gateway[16];
+static char s_dns[16];
+
+bool wifi_parse_ipv4(const char *s, uint32_t *out)
+{
+    if (!s || !*s)
+        return false;
+    uint32_t parts[4] = {0};
+    const char *p = s;
+    for (int i = 0; i < 4; i++) {
+        if (*p < '0' || *p > '9')
+            return false;
+        if (*p == '0' && p[1] >= '0' && p[1] <= '9')
+            return false;
+        uint32_t v = 0;
+        int digits = 0;
+        while (*p >= '0' && *p <= '9') {
+            v = v * 10 + (uint32_t)(*p - '0');
+            p++;
+            if (++digits > 3 || v > 255)
+                return false;
+        }
+        parts[i] = v;
+        if (i < 3) {
+            if (*p != '.')
+                return false;
+            p++;
+        }
+    }
+    if (*p != 0)
+        return false;
+    if (out)
+        *out = ESP_IP4TOADDR(parts[0], parts[1], parts[2], parts[3]);
+    return true;
+}
+
+static void apply_static_dns(void)
+{
+    if (!s_sta_netif)
+        return;
+    uint32_t gw = 0, dns_addr = 0;
+    if (!wifi_parse_ipv4(s_gateway, &gw) || !gw)
+        return;
+    if (!s_dns[0] || !wifi_parse_ipv4(s_dns, &dns_addr) || !dns_addr)
+        dns_addr = gw;
+    esp_netif_dns_info_t dns = {0};
+    dns.ip.type = ESP_IPADDR_TYPE_V4;
+    dns.ip.u_addr.ip4.addr = dns_addr;
+    esp_err_t err = esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_MAIN, &dns);
+    if (err != ESP_OK)
+        ESP_LOGW(TAG, "set static dns failed: %s", esp_err_to_name(err));
+}
+
+static void apply_static_ip(void)
+{
+    if (!s_sta_netif)
+        return;
+    uint32_t ip = 0, mask = 0, gw = 0;
+    if (!wifi_parse_ipv4(s_static_ip, &ip) || !ip || !wifi_parse_ipv4(s_netmask, &mask) || !mask ||
+        !wifi_parse_ipv4(s_gateway, &gw) || !gw) {
+        ESP_LOGW(TAG, "invalid static IP config, falling back to DHCP");
+        s_use_static_ip = false;
+        esp_netif_dhcpc_start(s_sta_netif);
+        return;
+    }
+
+    esp_err_t err = esp_netif_dhcpc_stop(s_sta_netif);
+    if (err != ESP_OK && err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
+        ESP_LOGE(TAG, "dhcpc_stop failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    esp_netif_ip_info_t info = {0};
+    info.ip.addr = ip;
+    info.netmask.addr = mask;
+    info.gw.addr = gw;
+    err = esp_netif_set_ip_info(s_sta_netif, &info);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "set static ip failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    ESP_LOGI(TAG, "configured static IP %s mask %s gw %s dns %s", s_static_ip, s_netmask, s_gateway,
+             s_dns[0] ? s_dns : s_gateway);
+}
+
+static void compute_ap_ssid(void)
+{
+    if (s_custom_ap_ssid[0])
+        snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s", s_custom_ap_ssid);
+    else
+        snprintf(s_ap_ssid, sizeof(s_ap_ssid), "AirPrint-Setup-%02X%02X", s_sta_mac[4], s_sta_mac[5]);
+}
 
 static void start_ap_internal(void)
 {
     if (s_ap_active)
         return;
     wifi_config_t ap = {0};
-    snprintf((char *)ap.ap.ssid, sizeof(ap.ap.ssid), "%s", s_ap_ssid);
-    ap.ap.ssid_len = (uint8_t)strlen(s_ap_ssid);
+    size_t slen = strlen(s_ap_ssid);
+    if (slen > sizeof(ap.ap.ssid))
+        slen = sizeof(ap.ap.ssid);
+    memcpy(ap.ap.ssid, s_ap_ssid, slen);
+    ap.ap.ssid_len = (uint8_t)slen;
     ap.ap.channel = 1;
     ap.ap.max_connection = 4;
-    ap.ap.authmode = WIFI_AUTH_OPEN;
+    size_t plen = strlen(s_ap_pass);
+    if (plen >= 8 && plen < sizeof(ap.ap.password)) {
+        memcpy(ap.ap.password, s_ap_pass, plen);
+        ap.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    } else {
+        ap.ap.authmode = WIFI_AUTH_OPEN;
+    }
 
-    ESP_LOGW(TAG, "starting setup AP \"%s\" at 192.168.4.1", s_ap_ssid);
+    ESP_LOGW(TAG, "starting setup AP \"%s\" at 192.168.4.1 (%s)", s_ap_ssid,
+             ap.ap.authmode == WIFI_AUTH_OPEN ? "open" : "WPA2");
     esp_wifi_set_mode(WIFI_MODE_APSTA);
     esp_wifi_set_config(WIFI_IF_AP, &ap);
     s_ap_active = true;
@@ -87,7 +198,9 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *e = data;
-        ESP_LOGI(TAG, "connected, IP " IPSTR, IP2STR(&e->ip_info.ip));
+        if (s_use_static_ip)
+            apply_static_dns();
+        ESP_LOGI(TAG, "connected, IP " IPSTR " (%s)", IP2STR(&e->ip_info.ip), s_use_static_ip ? "static" : "DHCP");
         s_retries = 0;
         s_connected = true;
         s_ever_connected = true;
@@ -117,6 +230,21 @@ bool wifi_load_config(wifi_stored_cfg_t *out)
     l = sizeof(out->printer_name);
     if (nvs_get_str(h, "pname", out->printer_name, &l) != ESP_OK)
         out->printer_name[0] = 0;
+    uint8_t st = 0;
+    if (nvs_get_u8(h, "static", &st) == ESP_OK)
+        out->use_static_ip = st != 0;
+    l = sizeof(out->static_ip);
+    if (nvs_get_str(h, "ip", out->static_ip, &l) != ESP_OK)
+        out->static_ip[0] = 0;
+    l = sizeof(out->netmask);
+    if (nvs_get_str(h, "mask", out->netmask, &l) != ESP_OK)
+        out->netmask[0] = 0;
+    l = sizeof(out->gateway);
+    if (nvs_get_str(h, "gw", out->gateway, &l) != ESP_OK)
+        out->gateway[0] = 0;
+    l = sizeof(out->dns);
+    if (nvs_get_str(h, "dns", out->dns, &l) != ESP_OK)
+        out->dns[0] = 0;
     nvs_close(h);
     return ok;
 }
@@ -134,6 +262,16 @@ esp_err_t wifi_save_config(const wifi_stored_cfg_t *cfg)
         err = nvs_set_str(h, "host", cfg->hostname);
     if (err == ESP_OK && cfg->printer_name[0])
         err = nvs_set_str(h, "pname", cfg->printer_name);
+    if (err == ESP_OK)
+        err = nvs_set_u8(h, "static", cfg->use_static_ip ? 1 : 0);
+    if (err == ESP_OK)
+        err = nvs_set_str(h, "ip", cfg->static_ip);
+    if (err == ESP_OK)
+        err = nvs_set_str(h, "mask", cfg->netmask);
+    if (err == ESP_OK)
+        err = nvs_set_str(h, "gw", cfg->gateway);
+    if (err == ESP_OK)
+        err = nvs_set_str(h, "dns", cfg->dns);
     if (err == ESP_OK)
         err = nvs_commit(h);
     nvs_close(h);
@@ -154,6 +292,81 @@ esp_err_t wifi_clear_config(void)
     return err;
 }
 
+bool wifi_load_sec_config(wifi_sec_cfg_t *out)
+{
+    if (!out)
+        return false;
+    memset(out, 0, sizeof(*out));
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK)
+        return false;
+    size_t l = sizeof(out->ap_ssid);
+    if (nvs_get_str(h, "ap_ssid", out->ap_ssid, &l) != ESP_OK)
+        out->ap_ssid[0] = 0;
+    l = sizeof(out->ap_password);
+    if (nvs_get_str(h, "ap_pass", out->ap_password, &l) != ESP_OK)
+        out->ap_password[0] = 0;
+    l = sizeof(out->admin_password);
+    if (nvs_get_str(h, "adm_pass", out->admin_password, &l) != ESP_OK)
+        out->admin_password[0] = 0;
+    nvs_close(h);
+    return out->ap_ssid[0] || out->ap_password[0] || out->admin_password[0];
+}
+
+esp_err_t wifi_save_sec_config(const wifi_sec_cfg_t *cfg)
+{
+    if (!cfg)
+        return ESP_ERR_INVALID_ARG;
+    nvs_handle_t h;
+    ESP_RETURN_ON_ERROR(nvs_open(NVS_NS, NVS_READWRITE, &h), TAG, "nvs open");
+    esp_err_t err = nvs_set_str(h, "ap_ssid", cfg->ap_ssid);
+    if (err == ESP_OK)
+        err = nvs_set_str(h, "ap_pass", cfg->ap_password);
+    if (err == ESP_OK)
+        err = nvs_set_str(h, "adm_pass", cfg->admin_password);
+    if (err == ESP_OK)
+        err = nvs_commit(h);
+    nvs_close(h);
+    if (err == ESP_OK) {
+        snprintf(s_custom_ap_ssid, sizeof(s_custom_ap_ssid), "%s", cfg->ap_ssid);
+        snprintf(s_ap_pass, sizeof(s_ap_pass), "%s", cfg->ap_password);
+        snprintf(s_admin_pass, sizeof(s_admin_pass), "%s", cfg->admin_password);
+        compute_ap_ssid();
+    }
+    return err;
+}
+
+bool wifi_admin_protected(void)
+{
+    return s_admin_pass[0] != 0;
+}
+
+bool wifi_check_admin(const char *candidate)
+{
+    if (!s_admin_pass[0])
+        return true;
+    if (!candidate)
+        return false;
+    size_t la = strlen(s_admin_pass);
+    size_t lb = strlen(candidate);
+    uint8_t diff = la != lb ? 1 : 0;
+    size_t n = la < lb ? la : lb;
+    for (size_t i = 0; i < n; i++)
+        diff |= (uint8_t)(s_admin_pass[i] ^ candidate[i]);
+    return diff == 0;
+}
+
+bool wifi_ap_has_password(void)
+{
+    return strlen(s_ap_pass) >= 8;
+}
+
+void wifi_get_custom_ap_ssid(char *buf, size_t n)
+{
+    if (buf && n)
+        snprintf(buf, n, "%s", s_custom_ap_ssid);
+}
+
 esp_err_t wifi_start(const char *default_hostname)
 {
     esp_err_t err = nvs_flash_init();
@@ -163,9 +376,13 @@ esp_err_t wifi_start(const char *default_hostname)
     }
     ESP_RETURN_ON_ERROR(err, TAG, "nvs");
 
-    uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    snprintf(s_ap_ssid, sizeof(s_ap_ssid), "AirPrint-Setup-%02X%02X", mac[4], mac[5]);
+    esp_read_mac(s_sta_mac, ESP_MAC_WIFI_STA);
+    wifi_sec_cfg_t sec;
+    wifi_load_sec_config(&sec);
+    snprintf(s_custom_ap_ssid, sizeof(s_custom_ap_ssid), "%s", sec.ap_ssid);
+    snprintf(s_ap_pass, sizeof(s_ap_pass), "%s", sec.ap_password);
+    snprintf(s_admin_pass, sizeof(s_admin_pass), "%s", sec.admin_password);
+    compute_ap_ssid();
 
     wifi_stored_cfg_t stored;
     bool has_nvs = wifi_load_config(&stored);
@@ -176,6 +393,13 @@ esp_err_t wifi_start(const char *default_hostname)
                                              : (default_hostname && default_hostname[0] ? default_hostname : HOSTNAME));
     snprintf(s_printer_name, sizeof(s_printer_name), "%s",
              (has_nvs && stored.printer_name[0]) ? stored.printer_name : PRINTER_NAME);
+    if (has_nvs) {
+        s_use_static_ip = stored.use_static_ip;
+        snprintf(s_static_ip, sizeof(s_static_ip), "%s", stored.static_ip);
+        snprintf(s_netmask, sizeof(s_netmask), "%s", stored.netmask);
+        snprintf(s_gateway, sizeof(s_gateway), "%s", stored.gateway);
+        snprintf(s_dns, sizeof(s_dns), "%s", stored.dns);
+    }
 
     ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif");
     ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "event loop");
@@ -199,6 +423,8 @@ esp_err_t wifi_start(const char *default_hostname)
         cfg.sta.pmf_cfg.capable = true;
         ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "mode");
         ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &cfg), TAG, "config");
+        if (s_use_static_ip)
+            apply_static_ip();
         esp_wifi_set_ps(WIFI_PS_NONE);
         ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "start");
 
@@ -282,6 +508,32 @@ const char *wifi_effective_hostname(void)
 const char *wifi_effective_printer_name(void)
 {
     return s_printer_name[0] ? s_printer_name : PRINTER_NAME;
+}
+
+void wifi_get_static_cfg(bool *use_static, char *ip, size_t ip_n, char *mask, size_t mask_n, char *gw, size_t gw_n,
+                         char *dns, size_t dns_n)
+{
+    if (use_static)
+        *use_static = s_use_static_ip;
+    if (ip && ip_n)
+        snprintf(ip, ip_n, "%s", s_static_ip);
+    if (mask && mask_n)
+        snprintf(mask, mask_n, "%s", s_netmask);
+    if (gw && gw_n)
+        snprintf(gw, gw_n, "%s", s_gateway);
+    if (dns && dns_n)
+        snprintf(dns, dns_n, "%s", s_dns);
+}
+
+bool wifi_sta_has_password(void)
+{
+    return s_password[0] != 0;
+}
+
+void wifi_preserve_sta_password(const char *ssid, char *pass_out, size_t pass_n)
+{
+    if (ssid && pass_out && pass_n && !pass_out[0] && s_password[0] && strcmp(s_ssid, ssid) == 0)
+        snprintf(pass_out, pass_n, "%s", s_password);
 }
 
 int wifi_scan_json(char *buf, size_t n)

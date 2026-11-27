@@ -29,6 +29,7 @@
     type Item,
   } from '../lib/process.svelte';
   import { go, openPrint, openViewer, pickFiles, toast } from '../lib/ui.svelte';
+  import { i18n } from '../lib/i18n.svelte';
 
   let paper = $state<ExportPaper>(defaultPaper());
   let dpi = $state(200);
@@ -40,7 +41,7 @@
   let input: HTMLInputElement;
 
   async function fromFiles() {
-    const fs = await pickFiles('Add pages from Files');
+    const fs = await pickFiles(i18n.t.process.pickTitle);
     if (fs.length) await addFilesToWork(fs);
   }
 
@@ -80,7 +81,7 @@
   }
 
   function clear() {
-    if (confirm('Remove all pages from Process? Your files stay in Files.')) setItems([]);
+    if (confirm(i18n.t.process.confirmClear)) setItems([]);
   }
 
   async function exportIt() {
@@ -88,13 +89,13 @@
     progress = 0;
     try {
       const f = await exportPdf(work.items, { paper, dpi, fallback: defaultPaper() }, (d, t) => (progress = d / t));
-      toast(`Saved ${f.name} to Files`, 'ok', [
-        { label: 'Print', run: () => openPrint(f) },
-        { label: 'Download', run: () => download(f.blob, f.name) },
-        { label: 'Open', run: () => openViewer(f) },
+      toast(i18n.t.process.savedToast(f.name), 'ok', [
+        { label: i18n.t.process.print, run: () => openPrint(f) },
+        { label: i18n.t.process.download, run: () => download(f.blob, f.name) },
+        { label: i18n.t.process.open, run: () => openViewer(f) },
       ]);
     } catch (e) {
-      toast(`Export failed: ${(e as Error).message}`, 'error');
+      toast(i18n.t.process.exportFailed((e as Error).message), 'error');
     } finally {
       exporting = false;
     }
@@ -105,19 +106,19 @@
 
 <div class="head row wrap">
   <div class="grow">
-    <h1>Process</h1>
-    <p class="muted small">Put pages together, turn and crop them, make ID card copies, and save the result as a PDF.</p>
+    <h1>{i18n.t.process.title}</h1>
+    <p class="muted small">{i18n.t.process.subtitle}</p>
   </div>
 </div>
 
 <div class="toolbar row wrap">
-  <button class="btn" onclick={fromFiles}><FolderOpen size={17} /> Add from Files</button>
-  <button class="btn" onclick={() => input.click()}><Upload size={17} /> Upload</button>
-  <button class="btn" onclick={card}><IdCard size={17} /> ID card copy</button>
+  <button class="btn" onclick={fromFiles}><FolderOpen size={17} /> {i18n.t.process.addFromFiles}</button>
+  <button class="btn" onclick={() => input.click()}><Upload size={17} /> {i18n.t.process.upload}</button>
+  <button class="btn" onclick={card}><IdCard size={17} /> {i18n.t.process.idCardCopy}</button>
   <input bind:this={input} type="file" accept="application/pdf,image/*" multiple hidden onchange={upload} />
   <span class="grow"></span>
   {#if work.items.length}
-    <button class="btn ghost danger" onclick={clear}>Clear</button>
+    <button class="btn ghost danger" onclick={clear}>{i18n.t.process.clear}</button>
   {/if}
 </div>
 
@@ -125,12 +126,12 @@
   <div class="card empty">
     <Layers size={40} strokeWidth={1.4} />
     <div>
-      <b>Nothing here yet</b>
-      <p class="small">Add scans, pictures or PDF pages from Files, or start an ID card copy: both sides of a card on one sheet.</p>
+      <b>{i18n.t.process.nothingYet}</b>
+      <p class="small">{i18n.t.process.emptyDesc}</p>
     </div>
     <div class="row wrap" style="justify-content:center">
-      <button class="btn primary" onclick={fromFiles}><FolderOpen size={17} /> Add from Files</button>
-      <button class="btn" onclick={card}><IdCard size={17} /> ID card copy</button>
+      <button class="btn primary" onclick={fromFiles}><FolderOpen size={17} /> {i18n.t.process.addFromFiles}</button>
+      <button class="btn" onclick={card}><IdCard size={17} /> {i18n.t.process.idCardCopy}</button>
     </div>
   </div>
 {:else}
@@ -154,20 +155,20 @@
         >
           <ItemThumb item={it} />
           <span class="num">{i + 1}</span>
-          {#if it.kind === 'card'}<span class="tag"><IdCard size={13} /> ID card</span>{/if}
+          {#if it.kind === 'card'}<span class="tag"><IdCard size={13} /> {i18n.t.process.idCardTag}</span>{/if}
         </button>
         <div class="tools">
           {#if it.kind === 'page'}
-            <button class="icon-btn" onclick={() => rotate(it, -90)} title="Rotate left" aria-label="Rotate left"><RotateCcw size={17} /></button>
-            <button class="icon-btn" onclick={() => rotate(it, 90)} title="Rotate right" aria-label="Rotate right"><RotateCw size={17} /></button>
-            <button class="icon-btn" onclick={() => (cropping = it.id)} title="Crop" aria-label="Crop"><Crop size={17} /></button>
+            <button class="icon-btn" onclick={() => rotate(it, -90)} title={i18n.t.process.rotateLeft} aria-label={i18n.t.process.rotateLeft}><RotateCcw size={17} /></button>
+            <button class="icon-btn" onclick={() => rotate(it, 90)} title={i18n.t.process.rotateRight} aria-label={i18n.t.process.rotateRight}><RotateCw size={17} /></button>
+            <button class="icon-btn" onclick={() => (cropping = it.id)} title={i18n.t.process.crop} aria-label={i18n.t.process.crop}><Crop size={17} /></button>
           {:else}
-            <button class="icon-btn" onclick={() => (carding = it.id)} title="Edit" aria-label="Edit the card"><Pencil size={17} /></button>
+            <button class="icon-btn" onclick={() => (carding = it.id)} title={i18n.t.process.edit} aria-label={i18n.t.process.edit}><Pencil size={17} /></button>
           {/if}
           <span class="grow"></span>
-          <button class="icon-btn" onclick={() => moveItem(i, i - 1)} disabled={i === 0} title="Move earlier" aria-label="Move earlier"><ChevronLeft size={17} /></button>
-          <button class="icon-btn" onclick={() => moveItem(i, i + 1)} disabled={i === work.items.length - 1} title="Move later" aria-label="Move later"><ChevronRight size={17} /></button>
-          <button class="icon-btn" onclick={() => remove(it.id)} title="Remove" aria-label="Remove"><Trash2 size={17} /></button>
+          <button class="icon-btn" onclick={() => moveItem(i, i - 1)} disabled={i === 0} title={i18n.t.process.moveEarlier} aria-label={i18n.t.process.moveEarlier}><ChevronLeft size={17} /></button>
+          <button class="icon-btn" onclick={() => moveItem(i, i + 1)} disabled={i === work.items.length - 1} title={i18n.t.process.moveLater} aria-label={i18n.t.process.moveLater}><ChevronRight size={17} /></button>
+          <button class="icon-btn" onclick={() => remove(it.id)} title={i18n.t.process.remove} aria-label={i18n.t.process.remove}><Trash2 size={17} /></button>
         </div>
       </li>
     {/each}
@@ -175,19 +176,19 @@
 
   <section class="card card-pad export">
     <div class="field">
-      <span class="label">Page size</span>
+      <span class="label">{i18n.t.process.pageSize}</span>
       <div class="seg">
-        <button class:on={paper === 'a4'} onclick={() => (paper = 'a4')}>A4</button>
-        <button class:on={paper === 'letter'} onclick={() => (paper = 'letter')}>Letter</button>
-        <button class:on={paper === 'original'} onclick={() => (paper = 'original')}>As cropped</button>
+        <button class:on={paper === 'a4'} onclick={() => (paper = 'a4')}>{i18n.t.process.a4}</button>
+        <button class:on={paper === 'letter'} onclick={() => (paper = 'letter')}>{i18n.t.process.letter}</button>
+        <button class:on={paper === 'original'} onclick={() => (paper = 'original')}>{i18n.t.process.asCropped}</button>
       </div>
     </div>
     <div class="field">
-      <span class="label">Quality</span>
+      <span class="label">{i18n.t.process.quality}</span>
       <div class="seg">
-        <button class:on={dpi === 150} onclick={() => (dpi = 150)}>Small</button>
-        <button class:on={dpi === 200} onclick={() => (dpi = 200)}>Standard</button>
-        <button class:on={dpi === 300} onclick={() => (dpi = 300)}>Best</button>
+        <button class:on={dpi === 150} onclick={() => (dpi = 150)}>{i18n.t.process.small}</button>
+        <button class:on={dpi === 200} onclick={() => (dpi = 200)}>{i18n.t.process.standard}</button>
+        <button class:on={dpi === 300} onclick={() => (dpi = 300)}>{i18n.t.process.best}</button>
       </div>
     </div>
     <div class="go">
@@ -196,9 +197,9 @@
       {/if}
       <button class="btn primary big" onclick={exportIt} disabled={exporting}>
         {#if exporting}<LoaderCircle size={18} class="spin" />{:else}<FileDown size={18} />{/if}
-        Save as PDF
+        {i18n.t.process.savePdf}
       </button>
-      <span class="small muted">Saved to <a href="#/files" onclick={() => go('files')}>Files</a>, ready to print or download.</span>
+      <span class="small muted">{i18n.t.process.savedHintPre} <a href="#/files" onclick={() => go('files')}>{i18n.t.process.savedHintLink}</a>{i18n.t.process.savedHintPost}</span>
     </div>
   </section>
 {/if}

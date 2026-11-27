@@ -122,11 +122,14 @@ static bool mock_wifi_http(airprint_http_t *h, const char *method, const char *p
         int ndrv = 0;
         while (printer_drivers[ndrv])
             ndrv++;
-        char buf[512];
+        char buf[1024];
         int n = snprintf(buf, sizeof(buf),
                          "{\"connected\":true,\"ap_active\":false,\"rssi\":-52,\"ssid\":\"Host-Test-WiFi\","
                          "\"ip\":\"127.0.0.1\",\"ap_ssid\":\"AirPrint-Setup-HOST\",\"ap_ip\":\"192.168.4.1\","
                          "\"hostname\":\"airprint-host\",\"printer_name\":\"Host Test Printer\","
+                         "\"use_static_ip\":false,\"static_ip\":\"\",\"netmask\":\"\",\"gateway\":\"\",\"dns\":\"\","
+                         "\"has_password\":true,\"admin_protected\":false,\"ap_has_password\":false,\"ap_custom_ssid\":\"\","
+                         "\"fw_version\":\"host\",\"fw_date\":\"host\",\"fw_partition\":\"host\",\"ota_state\":\"valid\","
                          "\"driver\":\"canon-mg2500\",\"model\":\"Canon MG2500 series\",\"driver_count\":%d}",
                          ndrv);
         airprint_http_send_ex(h, "200 OK", "application/json", "Cache-Control: no-store\r\n", buf, (size_t)n);
@@ -138,9 +141,12 @@ static bool mock_wifi_http(airprint_http_t *h, const char *method, const char *p
         airprint_http_send_ex(h, "200 OK", "application/json", "Cache-Control: no-store\r\n", scan, sizeof(scan) - 1);
         return true;
     }
-    if (!strcmp(method, "POST") && (!strcmp(path, "/api/wifi") || !strcmp(path, "/api/wifi/reset"))) {
-        char tmp[256];
-        airprint_http_read_body(h, tmp, sizeof(tmp));
+    if (!strcmp(method, "POST") &&
+        (!strcmp(path, "/api/wifi") || !strcmp(path, "/api/wifi/reset") || !strcmp(path, "/api/security") ||
+         !strcmp(path, "/api/ota"))) {
+        char tmp[1024];
+        while (airprint_http_read_body(h, tmp, sizeof(tmp)) > 0)
+            ;
         static const char ok[] = "{\"ok\":true,\"rebooting\":false}";
         airprint_http_send(h, "200 OK", "application/json", ok, sizeof(ok) - 1);
         return true;

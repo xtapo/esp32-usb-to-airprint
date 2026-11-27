@@ -16,16 +16,10 @@
   import { loadWork } from './lib/process.svelte';
   import { initScanSync } from './lib/scan.svelte';
   import { ui } from './lib/ui.svelte';
+  import { i18n } from './lib/i18n.svelte';
 
   const ROUTES = ['printer', 'scanner', 'files', 'process', 'wifi'] as const;
   type Route = (typeof ROUTES)[number];
-  const TITLES: Record<Route, string> = {
-    printer: 'Printer',
-    scanner: 'Scanner',
-    files: 'Files',
-    process: 'Process',
-    wifi: 'WiFi',
-  };
 
   let hash = $state(location.hash);
   let narrow = $state(false);
@@ -52,7 +46,7 @@
 
   $effect(() => {
     const name = device.printer?.name;
-    document.title = current ? `${TITLES[current]} · ${name || 'Printer'}` : name || 'Printer';
+    document.title = current ? `${i18n.t.routes[current]} · ${name || i18n.t.routes.printer}` : name || i18n.t.routes.printer;
   });
 </script>
 
@@ -62,8 +56,8 @@
     <main>
       {#if narrow}
         <header class="topbar">
-          <a class="icon-btn" href="#/" aria-label="Back to the menu"><ArrowLeft size={20} /></a>
-          <h1>{TITLES[current]}</h1>
+          <a class="icon-btn" href="#/" aria-label={i18n.t.nav.backMenu}><ArrowLeft size={20} /></a>
+          <h1>{i18n.t.routes[current]}</h1>
         </header>
       {/if}
       <div class="content">

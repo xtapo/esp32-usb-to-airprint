@@ -98,11 +98,13 @@ struct airprint_http {
     char path[128];
     char host[96];
     char if_none_match[48];
+    char admin_auth[65];
     bool keep_alive;
     bool http10;                // HTTP/1.0 client: no chunked responses
     bool chunked_out;           // streaming response uses chunked encoding
     // body
     bool chunked;
+    int64_t content_len;
     int64_t remaining;          // Content-Length mode: bytes left; chunked: bytes left in chunk
     bool body_eof;
     bool in_chunks;             // a chunk was read: CRLF precedes the next size line
@@ -304,6 +306,16 @@ const char *airprint_http_host(airprint_http_t *c)
 const char *airprint_http_if_none_match(airprint_http_t *c)
 {
     return c->if_none_match;
+}
+
+int64_t airprint_http_content_length(airprint_http_t *c)
+{
+    return c->chunked ? -1 : c->content_len;
+}
+
+const char *airprint_http_admin_password(airprint_http_t *c)
+{
+    return c->admin_auth;
 }
 
 int airprint_http_stream_begin(airprint_http_t *c, const char *type, const char *extra_headers)
@@ -1586,11 +1598,13 @@ static void *conn_thread(void *arg)
         c->http10 = strcmp(version, "HTTP/1.0") == 0;
         c->keep_alive = !c->http10;
         c->chunked = false;
+        c->content_len = -1;
         c->remaining = 0;
         c->body_eof = false;
         c->in_chunks = false;
         c->host[0] = 0;
         c->if_none_match[0] = 0;
+        c->admin_auth[0] = 0;
         bool expect_continue = false, has_length = false;
         int hl;
         while ((hl = read_line(c, line, sizeof(line))) > 0) {
@@ -1602,6 +1616,7 @@ static void *conn_thread(void *arg)
                 v++;
             if (!strcasecmp(line, "Content-Length")) {
                 c->remaining = strtoll(v, NULL, 10);
+                c->content_len = c->remaining;
                 has_length = true;
             } else if (!strcasecmp(line, "Transfer-Encoding") && strcasestr(v, "chunked")) {
                 c->chunked = true;
@@ -1616,6 +1631,8 @@ static void *conn_thread(void *arg)
                 snprintf(c->host, sizeof(c->host), "%s", v);
             } else if (!strcasecmp(line, "If-None-Match")) {
                 snprintf(c->if_none_match, sizeof(c->if_none_match), "%s", v);
+            } else if (!strcasecmp(line, "X-Admin-Password")) {
+                snprintf(c->admin_auth, sizeof(c->admin_auth), "%s", v);
             }
         }
         if (hl < 0)
